@@ -15,7 +15,7 @@ open index.html         # macOS
 xdg-open index.html     # Linux
 ```
 
-Or visit the GitHub Pages URL once Pages is enabled (Settings → Pages → Branch: `main` / folder: `/`).
+Or visit the published page: **[musfique-ahmed.github.io/DA-Lab-Project](https://musfique-ahmed.github.io/DA-Lab-Project/)**
 
 ## Presentation mode
 
