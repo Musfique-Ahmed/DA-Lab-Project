@@ -1,0 +1,37 @@
+# ----- OS junk -----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ----- Editors / IDEs -----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ----- Node (none in this repo today, but harmless) -----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ----- puku CLI state (embeddings + config) -----
+.puku/
+
+# ----- Local build scaffolding & QA scripts (not part of the deliverable) -----
+build/
+
+# ----- Local build output (PowerPoint deck drafts) -----
+output/
+
+# ----- Personal drafts -----
+Presentation_Script.docx
+
+# ----- Any temporary verification scripts we drop in the repo root -----
+.verify.js
+.extract.js
+_extracted.js
+
+# ----- Logs ----
+*.log
