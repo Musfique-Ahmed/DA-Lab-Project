@@ -1,6 +1,6 @@
 # Credit Risk Intelligence — Phase 1 dependencies
 # Pinned to compatible-with-Python-3.14 major versions.
-# Phase 4 will add the DL framework (tensorflow or pytorch) when the MLP is built.
+# Phase 4 adds torch for the MLP (chosen over tensorflow because TF has no cp314 wheels).
 
 # --- Core data handling ---
 pandas>=2.2,<3
@@ -18,6 +18,10 @@ shap>=0.46,<1            # interpretability
 
 # --- Class-imbalance handling (Phase 4) ---
 imbalanced-learn>=0.12,<1
+
+# --- Deep learning (Phase 4 MLP) ---
+# PyTorch chosen because TensorFlow has no cp314 (Python 3.14) wheels.
+torch>=2.11,<3
 
 # --- Dashboard (Phase 5) ---
 streamlit>=1.38,<2
