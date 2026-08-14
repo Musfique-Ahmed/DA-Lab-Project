@@ -38,3 +38,27 @@ _extracted.js
 
 
 .home-credit-default-risk/
+
+# ----- Local virtual environment (Phase 1+) -----
+.venv/
+venv/
+
+# ----- Python bytecode / caches -----
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# ----- Processed data and model artifacts (regenerable from source) -----
+data/processed/*.parquet
+data/processed/*.npz
+data/processed/*.csv
+data/raw/
+models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.keras
+models/*.pt
+
+# ----- Package metadata -----
+*.egg-info/

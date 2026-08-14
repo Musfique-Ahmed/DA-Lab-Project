@@ -1,0 +1,31 @@
+# Credit Risk Intelligence — Phase 1 dependencies
+# Pinned to compatible-with-Python-3.14 major versions.
+# Phase 4 will add the DL framework (tensorflow or pytorch) when the MLP is built.
+
+# --- Core data handling ---
+pandas>=2.2,<3
+numpy>=2.0,<3
+
+# --- Visualization (EDA in Phase 2) ---
+matplotlib>=3.9,<4
+seaborn>=0.13,<1
+plotly>=5.22,<6
+
+# --- Modeling (Phases 3-4) ---
+scikit-learn>=1.5,<2
+xgboost>=2.0,<3          # chosen gradient-boosting library
+shap>=0.46,<1            # interpretability
+
+# --- Class-imbalance handling (Phase 4) ---
+imbalanced-learn>=0.12,<1
+
+# --- Dashboard (Phase 5) ---
+streamlit>=1.38,<2
+
+# --- Testing ---
+pytest>=8.3,<9
+
+# --- Persistence (parquet + joblib) ---
+# pyarrow pinned loosely: 17.x predates Python 3.14 wheels; allow 18+ for 3.14 support.
+pyarrow>=17.0,<23
+joblib>=1.4,<2
