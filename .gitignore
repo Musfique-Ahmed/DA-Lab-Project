@@ -35,3 +35,6 @@ _extracted.js
 
 # ----- Logs ----
 *.log
+
+
+.home-credit-default-risk/
