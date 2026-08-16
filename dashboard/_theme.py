@@ -58,7 +58,7 @@ MODEL_STATS: dict[str, str] = {
 # end-to-end without hunting across modules.
 _CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+/* @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');  -- removed: blocked CDNs broke hydration on 1.49 */
 
 /* ===== Tokens ===== */
 :root {
@@ -112,16 +112,18 @@ h3 { font-size: 1.125rem; line-height: 1.25; }
 
 /* ===== Browser surfaces ===== */
 ::selection { background: rgba(0, 217, 181, 0.30); color: var(--white); }
-* { caret-color: var(--mint); }
+/* * { caret-color: var(--mint); }   -- removed: universal selector broke hydration on Streamlit 1.49 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: var(--panel-deep); }
 ::-webkit-scrollbar-thumb { background: var(--panel-alt); border-radius: 8px; }
 ::-webkit-scrollbar-thumb:hover { background: #1F345F; }
+/*
 *:focus-visible {
     outline: 2px solid var(--mint);
     outline-offset: 2px;
     border-radius: 4px;
 }
+*/
 
 /* ===== Sidebar ===== */
 section[data-testid="stSidebar"] {

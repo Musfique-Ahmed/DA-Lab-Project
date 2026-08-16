@@ -24,7 +24,11 @@ imbalanced-learn>=0.12,<1
 torch>=2.11,<3
 
 # --- Dashboard (Phase 5) ---
-streamlit>=1.38,<2
+# Pin to <1.50: Streamlit 1.50+ migrated to an ASGI stack (uvicorn +
+# starlette) that has a WebSocket-after-handshake regression on Python
+# 3.14, leaving the browser stuck on skeleton placeholders forever.
+# Tested working version: 1.49.1 (Tornado-WSGI).
+streamlit>=1.38,<1.50
 
 # --- Testing ---
 pytest>=8.3,<9
