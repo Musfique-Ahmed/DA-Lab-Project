@@ -53,15 +53,15 @@ The dataset is heavily imbalanced (~8% default rate), mixes numeric and categori
 
 | ID | Hypothesis | Result |
 |---|---|---|
-| **H1** | Lower EXT_SOURCE → higher default | ✅ **SUPPORTED** — r ≈ −0.16 to −0.18, p ≈ 0 |
+| **H1** | Lower EXT_SOURCE → higher default | **SUPPORTED** — r ≈ −0.16 to −0.18, p ≈ 0 |
 | **H2** | Higher credit-to-income ratio → higher default | ❌ **NOT supported as stated** — inverted-U shape; Simpson's paradox from EXT_SOURCE confound |
-| **H3** | Occupation/education segments have elevated risk | ✅ **SUPPORTED** — Low-skill Laborers 17.2% vs Accountants 4.8% (3.5× spread); education shows clean monotonic gradient (10.9% → 1.8%) |
+| **H3** | Occupation/education segments have elevated risk | **SUPPORTED** — Low-skill Laborers 17.2% vs Accountants 4.8% (3.5× spread); education shows clean monotonic gradient (10.9% → 1.8%) |
 
 ### 3.3 Key findings (with numbers)
 
 - **`EXT_SOURCE_3` is the single most actionable external signal.** It should be required on every credit application.
 - **Credit-to-income (CTI) is non-monotonic.** Default rate peaks at 9.2% in decile 6 and falls to 7.1% at the top. When you condition on `EXT_SOURCE_3`, the sign of the CTI coefficient **flips** — a textbook Simpson's paradox driven by EXT_SOURCE confounding the naive CTI effect.
-- **Segment-level risk is real but small in effect size.** χ² p-values are astronomical (≪ 1e-200), but Cramér's V is only ~0.03–0.08. Segments are useful as adjuncts, not standalone decision rules.
+- **Segment-level risk is real but small in effect size.** Chi-squared p-values are astronomical (much less than 1e-200), but Cramér's V is only ~0.03–0.08. Segments are useful as adjuncts, not standalone decision rules.
 - **Income dominates among employment / income axes.** Income verification should be prioritized in the underwriting workflow.
 - **Class imbalance: 92/8.** Even a univariate AUC of 0.65 (the EXT_SOURCE mean alone) leaves substantial residual risk — multi-feature models are required.
 
@@ -143,7 +143,7 @@ The master prompt required "4+ ML/DL models." We picked a deliberately diverse s
 
 | Model | Imbalance | Config | Val AUC | Precision | Recall | F1 |
 |---|---|---|---:|---:|---:|---:|
-| **XGBoost** ✅ | balanced | `n_est=300, max_depth=4, lr=0.05, scale_pos_weight=11.39` | **0.7539** | 0.164 | 0.675 | 0.264 |
+| **XGBoost** *(winner)* | balanced | `n_est=300, max_depth=4, lr=0.05, scale_pos_weight=11.39` | **0.7539** | 0.164 | 0.675 | 0.264 |
 | Random Forest | balanced | `n_est=300, max_depth=None` | 0.7469 | 0.237 | 0.394 | 0.296 |
 | MLP (PyTorch) | pos_weight | `hidden=[128,64], dropout=0.3, epochs=12` | 0.7448 | 0.153 | 0.688 | 0.250 |
 | Logistic Regression | balanced | `C=10.0` | 0.7398 | 0.156 | 0.660 | 0.252 |

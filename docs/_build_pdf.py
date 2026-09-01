@@ -1,7 +1,9 @@
 """Render docs/PROJECT_DOCUMENTATION.md to a styled PDF.
 
-Uses `markdown` to convert MD -> HTML, then `reportlab` to render a
-multi-page PDF with title page, headings, tables, and code blocks.
+Strategy: parse the markdown **directly** into reportlab Flowables.
+We skip markdown -> HTML entirely so we never have to round-trip through
+a fragile HTML parser (the previous version rendered raw tags and
+inlined code blocks incorrectly).
 
 Run:
     py docs/_build_pdf.py
@@ -9,26 +11,41 @@ Run:
 from __future__ import annotations
 
 import re
-from html.parser import HTMLParser
 from pathlib import Path
 
-import markdown
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_LEFT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    NextPageTemplate,
     PageBreak,
     PageTemplate,
     Paragraph,
-    SimpleDocTemplate,
+    Preformatted,
     Spacer,
     Table,
     TableStyle,
 )
+
+# Register Windows system fonts that support the unicode glyphs we use
+# (→ ← ≥ ≤ × · χ² ≪). Helvetica (PDF Type 1) doesn't include these.
+_FONT_REGULAR = "Helvetica"        # fallback for body if TTF fails
+_FONT_BOLD = "Helvetica-Bold"
+try:
+    pdfmetrics.registerFont(TTFont("AppSans", r"C:\Windows\Fonts\segoeui.ttf"))
+    pdfmetrics.registerFont(TTFont("AppSansBold", r"C:\Windows\Fonts\segoeuib.ttf"))
+    pdfmetrics.registerFont(TTFont("AppMono", r"C:\Windows\Fonts\consola.ttf"))
+    _FONT_REGULAR = "AppSans"
+    _FONT_BOLD = "AppSansBold"
+    _FONT_MONO = "AppMono"
+except Exception:
+    # Fall back to Helvetica; we'll lose some glyphs but the PDF still builds.
+    _FONT_MONO = "Courier"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MD_PATH = REPO_ROOT / "docs" / "PROJECT_DOCUMENTATION.md"
@@ -36,332 +53,462 @@ PDF_PATH = REPO_ROOT / "docs" / "PROJECT_DOCUMENTATION.pdf"
 
 
 # ---------------------------------------------------------------------------
-# Minimal HTML parser — converts the HTML stream into a list of
-# reportlab Flowables (Paragraph / Table / Spacer). Deliberately small:
-# handles h1-h6, p, strong, em, code, ul/ol/li, table, thead, tbody, tr,
-# th, td, hr, br. Anything else is rendered as inline runs.
+# Markdown -> Flowables
+# ---------------------------------------------------------------------------
+# Inline emphasis is converted to reportlab mini-tags (`<b>`, `<i>`,
+# `<font name="Courier">`) so paragraphs render correctly via Paragraph.
+# Code blocks (indented or fenced) become Preformatted.
+# GFM tables become Table Flowables.
+
+INLINE_CODE = re.compile(r"`([^`\n]+)`")
+BOLD = re.compile(r"\*\*(.+?)\*\*")
+ITALIC = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
+LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+CODE_FENCE = re.compile(r"^```([a-zA-Z0-9_-]*)\s*$")
+TABLE_DIVIDER = re.compile(r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
+
+
+def inline_md_to_rl(text: str) -> str:
+    """Convert markdown inline syntax to reportlab inline tags.
+
+    Order matters. We first locate backtick code spans and **mask** them
+    so bold/italic regexes don't see `*` characters inside code spans.
+    Then apply bold/italic/link. Finally unmask the code spans with the
+    Courier font tag.
+    """
+    # 1. Escape XML-significant chars
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # 2. Mask inline code spans with placeholders that don't contain
+    #    any markdown-significant chars. Use a single sentinel char
+    #    unlikely to appear in the doc text.
+    sentinels: list[str] = []
+    def _mask(m: re.Match) -> str:
+        idx = len(sentinels)
+        sentinels.append(m.group(1))
+        return f"\x00CODE{idx}\x00"
+    text = INLINE_CODE.sub(_mask, text)
+
+    # 3. Bold + italic + links
+    text = BOLD.sub(r"<b>\1</b>", text)
+    text = ITALIC.sub(r"<i>\1</i>", text)
+    text = LINK.sub(r"\1", text)
+
+    # 4. Unmask code spans -> monospace font
+    def _unmask(m: re.Match) -> str:
+        idx = int(m.group(1))
+        inner = sentinels[idx]
+        return f'<font name="{_FONT_MONO}" color="#0A1428">{inner}</font>'
+    text = re.sub(r"\x00CODE(\d+)\x00", _unmask, text)
+
+    return text
+
+
+def split_table_row(line: str) -> list[str]:
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    if s.endswith("|"):
+        s = s[:-1]
+    return [c.strip() for c in s.split("|")]
+
+
+def is_table_header_border(line: str) -> bool:
+    return bool(TABLE_DIVIDER.match(line.strip()))
+
+
+# ---------------------------------------------------------------------------
+# Style sheet
 # ---------------------------------------------------------------------------
 
 
-class FlowBuilder(HTMLParser):
-    def __init__(self, styles):
-        super().__init__(convert_charrefs=True)
-        self.styles = styles
-        self.flowables = []
-        self.stack = []           # list of dicts: {tag, attrs, buf}
-        self.text_buf = ""
-        self.in_table = None      # current table being built
-        self.in_tr = None         # current row
-        self.list_stack = []      # list of (kind, counter)
-        self.paragraph_style = None  # current Paragraph style override
+def build_styles():
+    s = getSampleStyleSheet()
 
-    # -- helpers ------------------------------------------------------------
-    def _flush_text(self, into=None):
-        """Flush accumulated text buffer into the topmost inline container."""
-        if not self.text_buf.strip():
-            self.text_buf = ""
-            return
-        target = self.stack[-1] if self.stack else None
-        if target is not None and "buf" in target:
-            target["buf"].append(self.text_buf)
-        elif into is not None:
-            into.append(self.text_buf)
-        self.text_buf = ""
+    body = ParagraphStyle(
+        "BodyText",
+        parent=s["BodyText"],
+        fontName=_FONT_REGULAR,
+        fontSize=10,
+        leading=14,
+        spaceAfter=6,
+        textColor=colors.HexColor("#0F172A"),
+    )
 
-    def _new_style(self, style_name, parent="BodyText", **overrides):
-        s = ParagraphStyle(
-            name=style_name,
-            parent=self.styles[parent],
-            **overrides,
+    def heading(name, size, before, after, color="#0A1428"):
+        return ParagraphStyle(
+            name,
+            parent=s["Heading2"],
+            fontName=_FONT_BOLD,
+            fontSize=size,
+            leading=size * 1.25,
+            spaceBefore=before,
+            spaceAfter=after,
+            textColor=colors.HexColor(color),
         )
-        self.styles.add(s) if style_name not in self.styles.byName else None
-        return self.styles[style_name]
 
-    # -- handlers ------------------------------------------------------------
-    def handle_starttag(self, tag, attrs):
-        attrs_d = dict(attrs)
-
-        # Reset text buffer into the parent before opening a new container
-        self._flush_text()
-
-        if tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
-            level = int(tag[1])
-            style_name = f"Heading{level}"
-            if style_name not in self.styles.byName:
-                size = {1: 22, 2: 18, 3: 14, 4: 12, 5: 11, 6: 10}[level]
-                space_before = {1: 18, 2: 14, 3: 10, 4: 8, 5: 6, 6: 4}[level]
-                space_after = {1: 10, 2: 8, 3: 6, 4: 4, 5: 3, 6: 2}[level]
-                self._new_style(
-                    style_name,
-                    parent="Heading1" if level == 1 else "Heading2",
-                    fontSize=size,
-                    leading=size * 1.25,
-                    spaceBefore=space_before,
-                    spaceAfter=space_after,
-                    textColor=colors.HexColor("#0A1428"),
-                    fontName="Helvetica-Bold",
-                )
-            self.stack.append({"tag": tag, "style": self.styles[style_name], "buf": []})
-
-        elif tag == "p":
-            self.stack.append({"tag": "p", "style": self.styles["BodyText"], "buf": []})
-
-        elif tag == "strong" or tag == "b":
-            self.stack.append({"tag": "strong", "buf": []})
-
-        elif tag == "em" or tag == "i":
-            self.stack.append({"tag": "em", "buf": []})
-
-        elif tag == "code":
-            self.stack.append({"tag": "code", "buf": []})
-
-        elif tag == "br":
-            self.text_buf += "\n"
-
-        elif tag == "hr":
-            self.flowables.append(Spacer(1, 0.4 * cm))
-            self.flowables.append(Table([[""]], colWidths=[16 * cm], rowHeights=[0.02 * cm],
-                                         style=TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.grey)])))
-
-        elif tag == "ul":
-            self.list_stack.append(("ul", 0))
-
-        elif tag == "ol":
-            self.list_stack.append(("ol", 0))
-
-        elif tag == "li":
-            kind, _ = self.list_stack[-1] if self.list_stack else ("ul", 0)
-            if kind == "ol":
-                self.list_stack[-1] = (kind, self.list_stack[-1][1] + 1)
-                bullet = f"{self.list_stack[-1][1]}. "
-            else:
-                bullet = "• "
-            self.stack.append({"tag": "li", "bullet": bullet, "buf": []})
-
-        elif tag == "table":
-            self.in_table = {"rows": [], "current_row": None, "widths": []}
-
-        elif tag == "thead":
-            self.in_table["section"] = "thead"
-
-        elif tag == "tbody":
-            self.in_table["section"] = "tbody"
-
-        elif tag == "tr":
-            self.in_table["current_row"] = []
-
-        elif tag in ("th", "td"):
-            self.stack.append({"tag": tag, "buf": []})
-
-        elif tag == "blockquote":
-            self.stack.append({"tag": "blockquote", "buf": []})
-
-    def handle_endtag(self, tag):
-        self._flush_text()
-        if not self.stack and tag not in ("table", "tr", "th", "td", "thead", "tbody", "ul", "ol", "li"):
-            return
-
-        if tag in ("h1", "h2", "h3", "h4", "h5", "h6", "p"):
-            node = self.stack.pop()
-            text = "".join(node["buf"]).strip()
-            if text:
-                style = node["style"]
-                self.flowables.append(Paragraph(text, style))
-
-        elif tag in ("strong", "b", "em", "i", "code"):
-            node = self.stack.pop()
-            inner = "".join(node["buf"])
-            if tag in ("strong", "b"):
-                self.text_buf += f"<b>{inner}</b>"
-            elif tag in ("em", "i"):
-                self.text_buf += f"<i>{inner}</i>"
-            elif tag == "code":
-                self.text_buf += f'<font face="Courier" backColor="#F4F4F4">{inner}</font>'
-
-        elif tag == "li":
-            node = self.stack.pop()
-            text = "".join(node["buf"]).strip()
-            if text:
-                bullet = node.get("bullet", "• ")
-                self.flowables.append(Paragraph(
-                    f"{bullet}{text}",
-                    ParagraphStyle(
-                        name="ListItem",
-                        parent=self.styles["BodyText"],
-                        leftIndent=14,
-                        bulletIndent=2,
-                        spaceBefore=2,
-                        spaceAfter=2,
-                    ),
-                ))
-
-        elif tag in ("ul", "ol"):
-            if self.list_stack:
-                self.list_stack.pop()
-            self.flowables.append(Spacer(1, 0.15 * cm))
-
-        elif tag in ("th", "td"):
-            node = self.stack.pop()
-            cell_text = "".join(node["buf"]).strip()
-            if self.in_table and self.in_table["current_row"] is not None:
-                self.in_table["current_row"].append(cell_text)
-
-        elif tag == "tr":
-            if self.in_table and self.in_table["current_row"] is not None:
-                self.in_table["rows"].append(self.in_table["current_row"])
-                self.in_table["current_row"] = None
-
-        elif tag in ("thead", "tbody"):
-            if self.in_table:
-                self.in_table["section"] = None
-
-        elif tag == "table":
-            tbl = self.in_table
-            self.in_table = None
-            if tbl and tbl["rows"]:
-                # Build Table
-                data = tbl["rows"]
-                # Equal-width columns
-                col_w = (16 * cm) / max(len(data[0]), 1)
-                t = Table(data, colWidths=[col_w] * len(data[0]), repeatRows=1)
-                t.setStyle(TableStyle([
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0A1428")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.whitesmoke),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("FONTSIZE", (0, 0), (-1, 0), 9),
-                    ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                    ("FONTSIZE", (0, 1), (-1, -1), 8),
-                    ("ALIGN", (0, 0), (-1, -1), "LEFT"),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("LEFTPADDING", (0, 0), (-1, -1), 4),
-                    ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-                    ("TOPPADDING", (0, 0), (-1, -1), 3),
-                    ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
-                    ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CBD5E1")),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1),
-                     [colors.white, colors.HexColor("#F8FAFC")]),
-                ]))
-                self.flowables.append(Spacer(1, 0.2 * cm))
-                self.flowables.append(t)
-                self.flowables.append(Spacer(1, 0.3 * cm))
-
-    def handle_data(self, data):
-        if self.in_table is not None and self.stack:
-            # buffer into the latest cell/row
-            node = self.stack[-1]
-            if "buf" in node:
-                node["buf"].append(data)
-            return
-        if self.list_stack and self.stack and self.stack[-1].get("tag") == "li":
-            self.stack[-1]["buf"].append(data)
-            return
-        self.text_buf += data
-
-    def handle_entityref(self, name):
-        # Convert a few common entities
-        mapping = {"amp": "&", "lt": "<", "gt": ">", "quot": '"', "apos": "'", "nbsp": " "}
-        self.text_buf += mapping.get(name, f"&{name};")
-
-    def handle_charref(self, name):
-        try:
-            if name.startswith(("x", "X")):
-                self.text_buf += chr(int(name[1:], 16))
-            else:
-                self.text_buf += chr(int(name))
-        except ValueError:
-            pass
+    h1 = heading("Heading1", 22, 18, 10)
+    h2 = heading("Heading2", 16, 14, 8)
+    h3 = heading("Heading3", 13, 10, 6)
+    h4 = heading("Heading4", 11, 8, 4)
+    code_style = ParagraphStyle(
+        "Code",
+        parent=body,
+        fontName=_FONT_MONO,
+        fontSize=9,
+        leading=12,
+        leftIndent=0,
+        backColor=colors.HexColor("#F4F4F4"),
+        textColor=colors.HexColor("#0A1428"),
+        spaceBefore=4,
+        spaceAfter=4,
+        borderPadding=4,
+    )
+    list_item = ParagraphStyle(
+        "ListItem",
+        parent=body,
+        leftIndent=16,
+        bulletIndent=4,
+        spaceBefore=2,
+        spaceAfter=2,
+    )
+    table_cell = ParagraphStyle(
+        "TableCell",
+        parent=body,
+        fontSize=8,
+        leading=10,
+        spaceAfter=0,
+        spaceBefore=0,
+    )
+    table_head = ParagraphStyle(
+        "TableHead",
+        parent=table_cell,
+        fontName=_FONT_BOLD,
+        textColor=colors.whitesmoke,
+    )
+    return {
+        "body": body,
+        "h1": h1,
+        "h2": h2,
+        "h3": h3,
+        "h4": h4,
+        "code": code_style,
+        "list": list_item,
+        "cell": table_cell,
+        "thead": table_head,
+    }
 
 
 # ---------------------------------------------------------------------------
-# Render
+# Build Flowables from markdown text
 # ---------------------------------------------------------------------------
+
+
+def build_flowables(md_text: str, styles: dict) -> list:
+    lines = md_text.splitlines()
+    flowables = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+
+        # --- Skip blank lines between blocks ---
+        if not stripped:
+            i += 1
+            continue
+
+        # --- Fenced code block ---
+        if CODE_FENCE.match(stripped):
+            lang = CODE_FENCE.match(stripped).group(1)
+            i += 1
+            buf = []
+            while i < n and not CODE_FENCE.match(lines[i].strip()):
+                buf.append(lines[i])
+                i += 1
+            i += 1  # consume closing fence
+            code_text = "\n".join(buf)
+            flowables.append(Spacer(1, 0.2 * cm))
+            flowables.append(_code_block(code_text, styles))
+            flowables.append(Spacer(1, 0.3 * cm))
+            continue
+
+        # --- Indented code block (4 spaces) ---
+        if line.startswith("    ") or line.startswith("\t"):
+            buf = []
+            while i < n and (lines[i].startswith("    ") or lines[i].startswith("\t") or lines[i] == ""):
+                buf.append(lines[i][4:] if lines[i].startswith("    ") else lines[i][1:])
+                i += 1
+            code_text = "\n".join(buf).rstrip("\n")
+            flowables.append(Spacer(1, 0.2 * cm))
+            flowables.append(_code_block(code_text, styles))
+            flowables.append(Spacer(1, 0.3 * cm))
+            continue
+
+        # --- Headings ---
+        m = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if m:
+            level = len(m.group(1))
+            text = m.group(2).strip()
+            style = styles[f"h{min(level, 4)}"]
+            flowables.append(Paragraph(inline_md_to_rl(text), style))
+            i += 1
+            continue
+
+        # --- Horizontal rule ---
+        if re.match(r"^(\*\s*){3,}$|^-\s*-\s*-$|^_+\s*$", stripped):
+            flowables.append(Spacer(1, 0.3 * cm))
+            t = Table([[""]], colWidths=[17 * cm], rowHeights=[0.02 * cm])
+            t.setStyle(TableStyle([("LINEBELOW", (0, 0), (-1, -1), 0.5, colors.HexColor("#94A3B8"))]))
+            flowables.append(t)
+            flowables.append(Spacer(1, 0.3 * cm))
+            i += 1
+            continue
+
+        # --- Table (GFM pipe table) ---
+        # Header line + divider + body lines
+        if "|" in stripped and i + 1 < n and is_table_header_border(lines[i + 1]):
+            tbl_lines = [stripped, lines[i + 1].strip()]
+            i += 2
+            while i < n and "|" in lines[i].strip() and lines[i].strip():
+                tbl_lines.append(lines[i].strip())
+                i += 1
+            flowables.append(_table(tbl_lines, styles))
+            flowables.append(Spacer(1, 0.3 * cm))
+            continue
+
+        # --- Blockquote ---
+        if stripped.startswith(">"):
+            buf = []
+            while i < n and lines[i].strip().startswith(">"):
+                buf.append(lines[i].strip().lstrip(">").strip())
+                i += 1
+            quote_text = " ".join(buf)
+            flowables.append(Paragraph(
+                inline_md_to_rl(quote_text),
+                ParagraphStyle(
+                    "BlockQuote",
+                    parent=styles["body"],
+                    leftIndent=16,
+                    textColor=colors.HexColor("#475569"),
+                    borderPadding=4,
+                ),
+            ))
+            continue
+
+        # --- List items ---
+        if re.match(r"^\s*[-*+]\s+", line) or re.match(r"^\s*\d+\.\s+", line):
+            list_lines = []
+            while i < n and (
+                re.match(r"^\s*[-*+]\s+", lines[i])
+                or re.match(r"^\s*\d+\.\s+", lines[i])
+                or (lines[i].strip() and list_lines and lines[i].startswith(" "))
+            ):
+                list_lines.append(lines[i])
+                i += 1
+            flowables.extend(_list(list_lines, styles))
+            continue
+
+        # --- Paragraph (collect continuation lines) ---
+        para = [stripped]
+        i += 1
+        while i < n:
+            nxt = lines[i]
+            if not nxt.strip():
+                break
+            if (
+                CODE_FENCE.match(nxt.strip())
+                or nxt.startswith("    ")
+                or nxt.startswith("\t")
+                or re.match(r"^(#{1,6})\s+", nxt.strip())
+                or re.match(r"^\s*[-*+]\s+", nxt)
+                or re.match(r"^\s*\d+\.\s+", nxt)
+                or ("|" in nxt and i + 1 < n and is_table_header_border(lines[i + 1]))
+                or nxt.strip().startswith(">")
+                or re.match(r"^(\*\s*){3,}$|^-\s*-\s*-$", nxt.strip())
+            ):
+                break
+            para.append(nxt.strip())
+            i += 1
+        text = " ".join(para)
+        flowables.append(Paragraph(inline_md_to_rl(text), styles["body"]))
+
+    return flowables
+
+
+# ---------------------------------------------------------------------------
+# Block builders
+# ---------------------------------------------------------------------------
+
+
+def _code_block(code_text: str, styles: dict):
+    # Use Preformatted for true verbatim rendering with monospace font.
+    return Preformatted(
+        code_text,
+        ParagraphStyle(
+            "CodeBlock",
+            parent=styles["body"],
+            fontName=_FONT_MONO,
+            fontSize=9,
+            leading=12,
+            backColor=colors.HexColor("#F4F4F4"),
+            textColor=colors.HexColor("#0A1428"),
+            borderPadding=6,
+            leftIndent=0,
+            rightIndent=0,
+            spaceBefore=0,
+            spaceAfter=0,
+        ),
+    )
+
+
+def _table(tbl_lines: list, styles: dict) -> Table:
+    header = split_table_row(tbl_lines[0])
+    body_rows = [split_table_row(r) for r in tbl_lines[2:]]
+
+    # Wrap each cell in a Paragraph so long text wraps inside the cell
+    data = []
+    head_row = [Paragraph(inline_md_to_rl(c), styles["thead"]) for c in header]
+    data.append(head_row)
+    for row in body_rows:
+        # Pad / trim to header width
+        cells = row + [""] * (len(header) - len(row))
+        cells = cells[: len(header)]
+        data.append([Paragraph(inline_md_to_rl(c), styles["cell"]) for c in cells])
+
+    n_cols = len(header)
+    page_w = 17 * cm
+    col_w = page_w / n_cols
+
+    t = Table(data, colWidths=[col_w] * n_cols, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0A1428")),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#CBD5E1")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+         [colors.white, colors.HexColor("#F8FAFC")]),
+    ]))
+    return t
+
+
+def _list(list_lines: list, styles: dict) -> list:
+    """Render markdown list lines as a sequence of bulleted Paragraphs."""
+    out = []
+    for ln in list_lines:
+        s = ln.strip()
+        # Determine bullet
+        if re.match(r"^[-*+]\s+", s):
+            text = re.sub(r"^[-*+]\s+", "", s)
+            bullet = "• "
+            style = styles["list"]
+        elif re.match(r"^\d+\.\s+", s):
+            text = re.sub(r"^\d+\.\s+", "", s)
+            # Pull the number from the original raw line for proper numbering
+            m = re.match(r"^\s*(\d+)\.\s+", ln)
+            num = m.group(1) if m else "1"
+            bullet = f"{num}. "
+            style = styles["list"]
+        else:
+            # Continuation line — append to previous (rare in our doc)
+            if out:
+                last = out[-1]
+                last_text = last.text if hasattr(last, "text") else ""
+                # best effort: just create a continuation paragraph
+                out.append(Paragraph(inline_md_to_rl(s), styles["body"]))
+            continue
+        out.append(Paragraph(bullet + inline_md_to_rl(text), style))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Page templates (cover + body)
+# ---------------------------------------------------------------------------
+
 
 def add_page_number(canvas, doc):
     canvas.saveState()
-    canvas.setFont("Helvetica", 8)
+    canvas.setFont(_FONT_REGULAR, 8)
     canvas.setFillColor(colors.HexColor("#64748B"))
-    canvas.drawRightString(20.5 * cm, 1 * cm, f"Page {doc.page}")
+    canvas.drawRightString(19 * cm, 1 * cm, f"Page {doc.page}")
     canvas.drawString(2 * cm, 1 * cm, "Credit Risk Intelligence — Project Documentation")
     canvas.restoreState()
 
 
-def add_cover(canvas, doc):
+def draw_cover(canvas, doc):
     canvas.saveState()
+    W, H = A4
+    # Background
     canvas.setFillColor(colors.HexColor("#0A1428"))
-    canvas.rect(0, 0, 21 * cm, 29.7 * cm, fill=1, stroke=0)
+    canvas.rect(0, 0, W, H, fill=1, stroke=0)
+
+    # Subtle accent rule near the top
     canvas.setFillColor(colors.HexColor("#00D9B5"))
-    canvas.setFont("Helvetica-Bold", 32)
-    canvas.drawString(2 * cm, 22 * cm, "Credit Risk")
-    canvas.drawString(2 * cm, 20.5 * cm, "Intelligence")
+    canvas.rect(2 * cm, H - 4 * cm, 3 * cm, 0.06 * cm, fill=1, stroke=0)
+
+    # Title (two lines)
     canvas.setFillColor(colors.whitesmoke)
-    canvas.setFont("Helvetica", 16)
-    canvas.drawString(2 * cm, 18 * cm, "Project Documentation")
-    canvas.setFont("Helvetica", 12)
+    canvas.setFont(_FONT_BOLD, 36)
+    canvas.drawString(2 * cm, H - 6 * cm, "Credit Risk")
+    canvas.drawString(2 * cm, H - 7.5 * cm, "Intelligence")
+
+    # Subtitle
     canvas.setFillColor(colors.HexColor("#94A3B8"))
-    canvas.drawString(2 * cm, 16 * cm, "Group DomainRange")
-    canvas.drawString(2 * cm, 15 * cm, "UIU Data Analytics Laboratory")
-    canvas.drawString(2 * cm, 14 * cm, "Musfique Ahmed · Tasfiya Binte Karim")
+    canvas.setFont(_FONT_REGULAR, 18)
+    canvas.drawString(2 * cm, H - 9.5 * cm, "Project Documentation")
+
+    # Authors
+    canvas.setFont(_FONT_REGULAR, 12)
+    canvas.drawString(2 * cm, H - 12 * cm, "Group DomainRange")
+    canvas.drawString(2 * cm, H - 13 * cm, "UIU Data Analytics Laboratory")
+    canvas.setFont(_FONT_REGULAR, 11)
+    canvas.drawString(2 * cm, H - 14 * cm, "Musfique Ahmed   ·   Tasfiya Binte Karim")
+
+    # Footer accent + dataset line
     canvas.setFillColor(colors.HexColor("#3B82F6"))
-    canvas.rect(2 * cm, 13 * cm, 4 * cm, 0.05 * cm, fill=1, stroke=0)
+    canvas.rect(2 * cm, 4 * cm, 5 * cm, 0.05 * cm, fill=1, stroke=0)
     canvas.setFillColor(colors.HexColor("#94A3B8"))
-    canvas.setFont("Helvetica", 10)
-    canvas.drawString(2 * cm, 4 * cm, "Home Credit Default Risk · 307,511 loans · XGBoost AUC 0.7578")
+    canvas.setFont(_FONT_REGULAR, 10)
+    canvas.drawString(2 * cm, 3.3 * cm, "Home Credit Default Risk   ·   307,511 loans   ·   XGBoost AUC 0.7578")
+
     canvas.restoreState()
+
+
+# ---------------------------------------------------------------------------
+# Build the PDF
+# ---------------------------------------------------------------------------
 
 
 def build_pdf():
     md_text = MD_PATH.read_text(encoding="utf-8")
+    styles = build_styles()
 
-    # Convert markdown -> HTML
-    html = markdown.markdown(
-        md_text,
-        extensions=["tables", "fenced_code", "sane_lists"],
-    )
-
-    styles = getSampleStyleSheet()
-    # Tweak body text
-    body = styles["BodyText"]
-    body.fontName = "Helvetica"
-    body.fontSize = 10
-    body.leading = 13
-    body.spaceAfter = 6
-    body.textColor = colors.HexColor("#0F172A")
-
-    # Heading 1 (used by "# Credit Risk...")
-    h1 = styles["Heading1"]
-    h1.fontName = "Helvetica-Bold"
-    h1.fontSize = 24
-    h1.leading = 28
-    h1.spaceBefore = 24
-    h1.spaceAfter = 12
-    h1.textColor = colors.HexColor("#0A1428")
-
-    h2 = styles["Heading2"]
-    h2.fontName = "Helvetica-Bold"
-    h2.fontSize = 18
-    h2.leading = 22
-    h2.spaceBefore = 16
-    h2.spaceAfter = 8
-    h2.textColor = colors.HexColor("#0A1428")
-
-    # Build flowables
-    builder = FlowBuilder(styles)
-    builder.feed(html)
-    builder._flush_text()
-
-    # Filter out the first H1 ("# Credit Risk Intelligence — Project Documentation")
-    # because the cover page already shows it
+    # Skip the first H1 (the doc title) since the cover page already shows it.
+    # Also skip the very first horizontal rule immediately after it.
+    all_flowables = build_flowables(md_text, styles)
     flowables = []
-    skip_first_h1 = True
-    for f in builder.flowables:
-        if skip_first_h1 and isinstance(f, Paragraph):
-            style_name = f.style.name if hasattr(f.style, "name") else ""
-            if style_name == "Heading1":
-                skip_first_h1 = False
-                continue
+    skip_next_hr = False
+    skipped_first_h1 = False
+    for f in all_flowables:
+        if (
+            not skipped_first_h1
+            and isinstance(f, Paragraph)
+            and getattr(f.style, "name", "") == "Heading1"
+        ):
+            skipped_first_h1 = True
+            skip_next_hr = True
+            continue
+        if skip_next_hr and isinstance(f, Table) and len(f._cellvalues) == 1:
+            # HR is a single-cell, single-row Table
+            skip_next_hr = False
+            continue
         flowables.append(f)
 
-    # Build doc — first page is the cover, subsequent pages have page numbers
     doc = BaseDocTemplate(
         str(PDF_PATH),
         pagesize=A4,
@@ -372,18 +519,22 @@ def build_pdf():
         title="Credit Risk Intelligence — Project Documentation",
         author="Group DomainRange",
     )
-    cover_frame = Frame(0, 0, 21 * cm, 29.7 * cm, id="cover", showBoundary=0)
+
+    cover_frame = Frame(0, 0, A4[0], A4[1], id="cover", showBoundary=0,
+                        leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
     body_frame = Frame(
-        2 * cm, 2 * cm, 17 * cm, 25.7 * cm, id="body", showBoundary=0,
+        2 * cm, 2 * cm, 17 * cm, 24.5 * cm, id="body", showBoundary=0,
         leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
     )
-    cover_template = PageTemplate(id="cover", frames=[cover_frame], onPage=add_cover)
+
+    cover_template = PageTemplate(id="cover", frames=[cover_frame], onPage=draw_cover)
     body_template = PageTemplate(id="body", frames=[body_frame], onPage=add_page_number)
     doc.addPageTemplates([cover_template, body_template])
 
-    story = [PageBreak()] + flowables
+    # Use the cover template for page 1, then switch to the body
+    # template for every subsequent page.
+    story = [NextPageTemplate("body"), PageBreak()] + flowables
     doc.build(story)
-
     print(f"PDF written: {PDF_PATH}")
 
 
