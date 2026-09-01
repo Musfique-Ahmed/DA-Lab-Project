@@ -62,3 +62,9 @@ models/*.pt
 
 # ----- Package metadata -----
 *.egg-info/
+
+# ----- Stray pip install artifacts (created when running `py -m pip install`
+#       in the repo root without a venv) -----
+Lib/
+Scripts/
+pyvenv.cfg
