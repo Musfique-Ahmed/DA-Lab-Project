@@ -12,9 +12,9 @@ Pipeline (in order):
   7. Standardize numeric features with StandardScaler fit on the 70% train slice only.
   8. Add a SPLIT column and persist to data/processed/train_clean.parquet.
 
-The cleaning function is designed so the same logic can be invoked from tests
-with synthetic inputs (no parquet I/O) and from a CLI runner that goes
-end-to-end against the real CSV.
+The human-facing pipeline is `notebooks/00_data_cleaning.ipynb`. This module
+keeps the same steps as importable functions so `tests/test_clean.py` can run
+them on synthetic frames. `run_cli()` is optional; prefer the notebook.
 """
 from __future__ import annotations
 

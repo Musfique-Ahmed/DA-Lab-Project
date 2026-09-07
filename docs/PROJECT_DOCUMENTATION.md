@@ -14,7 +14,7 @@ The dataset is heavily imbalanced (~8% default rate), mixes numeric and categori
 
 ## 2. Phase 1 — Data Cleaning & Preparation
 
-**Source files:** `src/data/clean.py`, `reports/data_quality_report.md`, `reports/cleaning_summary.md`
+**Source files:** `notebooks/00_data_cleaning.ipynb` (run this to clean), `reports/data_quality_report.md`, `reports/cleaning_summary.md`. Unit tests use `src/data/clean.py` on toy data.
 
 ### What we did
 

@@ -8,7 +8,7 @@ fabricated.
 | ✓ | Rubric line | Where it lives |
 |:-:|---|---|
 | [x] | 25+ features, 2,000+ rows (Phase 1) | 144 engineered columns × 307,511 rows in `data/processed/train_clean.parquet` |
-| [x] | Cleaning & preprocessing (Phase 1) | `src/data/clean.py`; `reports/data_quality_report.md`; `reports/cleaning_summary.md` |
+| [x] | Cleaning & preprocessing (Phase 1) | `notebooks/00_data_cleaning.ipynb`; `reports/data_quality_report.md`; `reports/cleaning_summary.md` |
 | [x] | EDA with business insight (Phase 2) | `notebooks/01_eda.ipynb` (10 sections, 23 figures); `reports/eda_findings.md` |
 | [x] | Feature selection + baseline-vs-reduced comparison (Phase 3) | `notebooks/02_feature_selection.ipynb` (7 sections); `reports/feature_importance.md` (top-30 ranked) |
 | [x] | Summarized key insights (Phase 2 & 3) | `reports/eda_findings.md` (Phase 2); Recommendation cell in `02_feature_selection.ipynb` |
@@ -22,10 +22,11 @@ fabricated.
 
 ### Phase 1 — Environment + cleaning
 
-- **Cleaning pipeline:** `src/data/clean.py`
+- **Cleaning notebook:** `notebooks/00_data_cleaning.ipynb` (human-facing pipeline).
+  Unit tests still call `src/data/clean.py` on synthetic frames.
   - Replaces `DAYS_EMPLOYED == 365243` sentinel with `NaN` (55,374 rows).
   - Drops columns with >60% missing values (`reports/cleaning_summary.md` lists them).
-  - Imputes remaining numeric gaps with median, categorical with mode.
+  - Imputes remaining numeric gaps with median, categoricals with `'MISSING'`.
   - One-hot encodes low-cardinality categoricals, frequency-encodes high-cardinality.
   - Fits `StandardScaler` on the **train slice only** to avoid leakage
     (covered by `test_scaler_fit_only_on_train`).

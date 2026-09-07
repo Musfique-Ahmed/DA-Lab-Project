@@ -21,7 +21,7 @@ This is a UIU Data Analytics Laboratory course project — **Group: DomainRange*
 
 | Phase | What | Where |
 |---|---|---|
-| 1 | Environment + cleaning pipeline | `src/data/clean.py`, `data/processed/train_clean.parquet` |
+| 1 | Environment + cleaning notebook | `notebooks/00_data_cleaning.ipynb`, `data/processed/train_clean.parquet` |
 | 2 | EDA + 3 hypothesis tests + 12 figures | `notebooks/01_eda.ipynb`, `reports/figures/01..12_*.png` |
 | 3 | Feature engineering + top-30 selection | `src/features/`, `notebooks/02_feature_selection.ipynb` |
 | 4 | 4-model comparison + scoring function | `src/models/`, `notebooks/03_model_building.ipynb` |
@@ -55,10 +55,11 @@ Per-phase detail:
 │   ├── best_model.pkl             # XGBoost artifact (gitignored)
 │   └── README.md
 ├── notebooks/
+│   ├── 00_data_cleaning.ipynb     # Phase 1 — run this to clean + write parquet
 │   ├── 01_eda.ipynb               # generated from _build_eda_notebook.py
 │   ├── 02_feature_selection.ipynb # generated from _build_phase3_notebook.py
 │   ├── 03_model_building.ipynb    # generated from _build_phase4_notebook.py
-│   └── _build_*.py                # canonical notebook builders
+│   └── _build_*.py                # canonical notebook builders (EDA / features / models)
 ├── reports/
 │   ├── cleaning_summary.md
 │   ├── data_quality_report.md
@@ -113,8 +114,9 @@ Each phase has a notebook builder that emits the `.ipynb` and (re)computes the
 artifacts. Run them in order:
 
 ```bash
-# Phase 1 — cleaning pipeline
-# Implemented in src/data/clean.py; run its tests to verify:
+# Phase 1 — cleaning notebook (writes data/processed/train_clean.parquet)
+# Open notebooks/00_data_cleaning.ipynb and Run All, or:
+.venv/Scripts/python -m jupyter nbconvert --to notebook --execute notebooks/00_data_cleaning.ipynb --inplace
 .venv/Scripts/python -m pytest tests/test_clean.py -v
 
 # Phase 2 — EDA notebook (also re-saves reports/figures/ and reports/eda_findings.md)
