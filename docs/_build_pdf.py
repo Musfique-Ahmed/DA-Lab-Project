@@ -1,4 +1,4 @@
-"""Render docs/PROJECT_DOCUMENTATION.md to a styled PDF.
+"""Render a docs/*.md file to a styled PDF.
 
 Strategy: parse the markdown **directly** into reportlab Flowables.
 We skip markdown -> HTML entirely so we never have to round-trip through
@@ -6,10 +6,13 @@ a fragile HTML parser (the previous version rendered raw tags and
 inlined code blocks incorrectly).
 
 Run:
-    py docs/_build_pdf.py
+    py docs/_build_pdf.py                          # PROJECT_DOCUMENTATION.md
+    py docs/_build_pdf.py --md docs/PROGRESS_PRESENTATION.md \
+        --subtitle "Progress Presentation"
 """
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
@@ -17,11 +20,14 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
     BaseDocTemplate,
     Frame,
+    Image,
+    KeepTogether,
     NextPageTemplate,
     PageBreak,
     PageTemplate,
@@ -48,8 +54,9 @@ except Exception:
     _FONT_MONO = "Courier"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MD_PATH = REPO_ROOT / "docs" / "PROJECT_DOCUMENTATION.md"
-PDF_PATH = REPO_ROOT / "docs" / "PROJECT_DOCUMENTATION.pdf"
+DEFAULT_MD_PATH = REPO_ROOT / "docs" / "PROJECT_DOCUMENTATION.md"
+
+FRAME_WIDTH = 17 * cm
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +73,11 @@ ITALIC = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)")
 LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 CODE_FENCE = re.compile(r"^```([a-zA-Z0-9_-]*)\s*$")
 TABLE_DIVIDER = re.compile(r"^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$")
+IMAGE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
+
+# Diagram languages we render as a caption instead of raw source: the
+# markdown viewer draws them, but the source text is noise in a PDF.
+DIAGRAM_LANGS = {"mermaid"}
 
 
 def inline_md_to_rl(text: str) -> str:
@@ -186,6 +198,16 @@ def build_styles():
         fontName=_FONT_BOLD,
         textColor=colors.whitesmoke,
     )
+    caption = ParagraphStyle(
+        "Caption",
+        parent=body,
+        fontSize=8,
+        leading=10,
+        alignment=1,
+        textColor=colors.HexColor("#64748B"),
+        spaceBefore=2,
+        spaceAfter=8,
+    )
     return {
         "body": body,
         "h1": h1,
@@ -196,6 +218,7 @@ def build_styles():
         "list": list_item,
         "cell": table_cell,
         "thead": table_head,
+        "caption": caption,
     }
 
 
@@ -204,7 +227,8 @@ def build_styles():
 # ---------------------------------------------------------------------------
 
 
-def build_flowables(md_text: str, styles: dict) -> list:
+def build_flowables(md_text: str, styles: dict, base_dir: Path | None = None) -> list:
+    base_dir = base_dir or REPO_ROOT
     lines = md_text.splitlines()
     flowables = []
     i = 0
@@ -219,6 +243,13 @@ def build_flowables(md_text: str, styles: dict) -> list:
             i += 1
             continue
 
+        # --- Standalone image ---
+        m_img = IMAGE.match(stripped)
+        if m_img:
+            flowables.extend(_image(m_img.group(1), m_img.group(2), base_dir, styles))
+            i += 1
+            continue
+
         # --- Fenced code block ---
         if CODE_FENCE.match(stripped):
             lang = CODE_FENCE.match(stripped).group(1)
@@ -228,6 +259,12 @@ def build_flowables(md_text: str, styles: dict) -> list:
                 buf.append(lines[i])
                 i += 1
             i += 1  # consume closing fence
+            if lang.lower() in DIAGRAM_LANGS:
+                flowables.append(Paragraph(
+                    f"[{lang} diagram — see the markdown source for the rendered version]",
+                    styles["caption"],
+                ))
+                continue
             code_text = "\n".join(buf)
             flowables.append(Spacer(1, 0.2 * cm))
             flowables.append(_code_block(code_text, styles))
@@ -326,6 +363,7 @@ def build_flowables(md_text: str, styles: dict) -> list:
                 or re.match(r"^\s*\d+\.\s+", nxt)
                 or ("|" in nxt and i + 1 < n and is_table_header_border(lines[i + 1]))
                 or nxt.strip().startswith(">")
+                or IMAGE.match(nxt.strip())
                 or re.match(r"^(\*\s*){3,}$|^-\s*-\s*-$", nxt.strip())
             ):
                 break
@@ -361,6 +399,30 @@ def _code_block(code_text: str, styles: dict):
             spaceAfter=0,
         ),
     )
+
+
+def _image(alt: str, src: str, base_dir: Path, styles: dict) -> list:
+    """Scale a figure to the frame width, capped so it fits on one page."""
+    path = (base_dir / src).resolve()
+    if not path.exists():
+        return [Paragraph(f"[missing figure: {src}]", styles["caption"])]
+
+    px_w, px_h = ImageReader(str(path)).getSize()
+    width = min(FRAME_WIDTH, 15 * cm)
+    height = width * px_h / px_w
+    max_height = 11 * cm
+    if height > max_height:
+        width *= max_height / height
+        height = max_height
+
+    img = Image(str(path), width=width, height=height)
+    img.hAlign = "CENTER"
+    block = [Spacer(1, 0.2 * cm), img]
+    if alt:
+        block.append(Paragraph(alt, styles["caption"]))
+    else:
+        block.append(Spacer(1, 0.3 * cm))
+    return [KeepTogether(block)]
 
 
 def _table(tbl_lines: list, styles: dict) -> Table:
@@ -431,52 +493,58 @@ def _list(list_lines: list, styles: dict) -> list:
 # ---------------------------------------------------------------------------
 
 
-def add_page_number(canvas, doc):
-    canvas.saveState()
-    canvas.setFont(_FONT_REGULAR, 8)
-    canvas.setFillColor(colors.HexColor("#64748B"))
-    canvas.drawRightString(19 * cm, 1 * cm, f"Page {doc.page}")
-    canvas.drawString(2 * cm, 1 * cm, "Credit Risk Intelligence — Project Documentation")
-    canvas.restoreState()
+def make_page_footer(subtitle: str):
+    def add_page_number(canvas, doc):
+        canvas.saveState()
+        canvas.setFont(_FONT_REGULAR, 8)
+        canvas.setFillColor(colors.HexColor("#64748B"))
+        canvas.drawRightString(19 * cm, 1 * cm, f"Page {doc.page}")
+        canvas.drawString(2 * cm, 1 * cm, f"Credit Risk Intelligence — {subtitle}")
+        canvas.restoreState()
+
+    return add_page_number
 
 
-def draw_cover(canvas, doc):
-    canvas.saveState()
-    W, H = A4
-    # Background
-    canvas.setFillColor(colors.HexColor("#0A1428"))
-    canvas.rect(0, 0, W, H, fill=1, stroke=0)
+def make_cover(subtitle: str):
+    def draw_cover(canvas, doc):
+        canvas.saveState()
+        W, H = A4
+        # Background
+        canvas.setFillColor(colors.HexColor("#0A1428"))
+        canvas.rect(0, 0, W, H, fill=1, stroke=0)
 
-    # Subtle accent rule near the top
-    canvas.setFillColor(colors.HexColor("#00D9B5"))
-    canvas.rect(2 * cm, H - 4 * cm, 3 * cm, 0.06 * cm, fill=1, stroke=0)
+        # Subtle accent rule near the top
+        canvas.setFillColor(colors.HexColor("#00D9B5"))
+        canvas.rect(2 * cm, H - 4 * cm, 3 * cm, 0.06 * cm, fill=1, stroke=0)
 
-    # Title (two lines)
-    canvas.setFillColor(colors.whitesmoke)
-    canvas.setFont(_FONT_BOLD, 36)
-    canvas.drawString(2 * cm, H - 6 * cm, "Credit Risk")
-    canvas.drawString(2 * cm, H - 7.5 * cm, "Intelligence")
+        # Title (two lines)
+        canvas.setFillColor(colors.whitesmoke)
+        canvas.setFont(_FONT_BOLD, 36)
+        canvas.drawString(2 * cm, H - 6 * cm, "Credit Risk")
+        canvas.drawString(2 * cm, H - 7.5 * cm, "Intelligence")
 
-    # Subtitle
-    canvas.setFillColor(colors.HexColor("#94A3B8"))
-    canvas.setFont(_FONT_REGULAR, 18)
-    canvas.drawString(2 * cm, H - 9.5 * cm, "Project Documentation")
+        # Subtitle
+        canvas.setFillColor(colors.HexColor("#94A3B8"))
+        canvas.setFont(_FONT_REGULAR, 18)
+        canvas.drawString(2 * cm, H - 9.5 * cm, subtitle)
 
-    # Authors
-    canvas.setFont(_FONT_REGULAR, 12)
-    canvas.drawString(2 * cm, H - 12 * cm, "Group DomainRange")
-    canvas.drawString(2 * cm, H - 13 * cm, "UIU Data Analytics Laboratory")
-    canvas.setFont(_FONT_REGULAR, 11)
-    canvas.drawString(2 * cm, H - 14 * cm, "Musfique Ahmed   ·   Tasfiya Binte Karim")
+        # Authors
+        canvas.setFont(_FONT_REGULAR, 12)
+        canvas.drawString(2 * cm, H - 12 * cm, "Group DomainRange")
+        canvas.drawString(2 * cm, H - 13 * cm, "UIU Data Analytics Laboratory")
+        canvas.setFont(_FONT_REGULAR, 11)
+        canvas.drawString(2 * cm, H - 14 * cm, "Musfique Ahmed   ·   Tasfiya Binte Karim")
 
-    # Footer accent + dataset line
-    canvas.setFillColor(colors.HexColor("#3B82F6"))
-    canvas.rect(2 * cm, 4 * cm, 5 * cm, 0.05 * cm, fill=1, stroke=0)
-    canvas.setFillColor(colors.HexColor("#94A3B8"))
-    canvas.setFont(_FONT_REGULAR, 10)
-    canvas.drawString(2 * cm, 3.3 * cm, "Home Credit Default Risk   ·   307,511 loans   ·   XGBoost AUC 0.7578")
+        # Footer accent + dataset line
+        canvas.setFillColor(colors.HexColor("#3B82F6"))
+        canvas.rect(2 * cm, 4 * cm, 5 * cm, 0.05 * cm, fill=1, stroke=0)
+        canvas.setFillColor(colors.HexColor("#94A3B8"))
+        canvas.setFont(_FONT_REGULAR, 10)
+        canvas.drawString(2 * cm, 3.3 * cm, "Home Credit Default Risk   ·   307,511 loans   ·   XGBoost AUC 0.7578")
 
-    canvas.restoreState()
+        canvas.restoreState()
+
+    return draw_cover
 
 
 # ---------------------------------------------------------------------------
@@ -484,13 +552,16 @@ def draw_cover(canvas, doc):
 # ---------------------------------------------------------------------------
 
 
-def build_pdf():
-    md_text = MD_PATH.read_text(encoding="utf-8")
+def build_pdf(md_path: Path = DEFAULT_MD_PATH, pdf_path: Path | None = None,
+              subtitle: str = "Project Documentation"):
+    md_path = Path(md_path)
+    pdf_path = Path(pdf_path) if pdf_path else md_path.with_suffix(".pdf")
+    md_text = md_path.read_text(encoding="utf-8")
     styles = build_styles()
 
     # Skip the first H1 (the doc title) since the cover page already shows it.
     # Also skip the very first horizontal rule immediately after it.
-    all_flowables = build_flowables(md_text, styles)
+    all_flowables = build_flowables(md_text, styles, base_dir=md_path.parent)
     flowables = []
     skip_next_hr = False
     skipped_first_h1 = False
@@ -510,33 +581,47 @@ def build_pdf():
         flowables.append(f)
 
     doc = BaseDocTemplate(
-        str(PDF_PATH),
+        str(pdf_path),
         pagesize=A4,
         leftMargin=2 * cm,
         rightMargin=2 * cm,
         topMargin=2 * cm,
         bottomMargin=2 * cm,
-        title="Credit Risk Intelligence — Project Documentation",
+        title=f"Credit Risk Intelligence — {subtitle}",
         author="Group DomainRange",
     )
 
     cover_frame = Frame(0, 0, A4[0], A4[1], id="cover", showBoundary=0,
                         leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0)
     body_frame = Frame(
-        2 * cm, 2 * cm, 17 * cm, 24.5 * cm, id="body", showBoundary=0,
+        2 * cm, 2 * cm, FRAME_WIDTH, 24.5 * cm, id="body", showBoundary=0,
         leftPadding=0, rightPadding=0, topPadding=0, bottomPadding=0,
     )
 
-    cover_template = PageTemplate(id="cover", frames=[cover_frame], onPage=draw_cover)
-    body_template = PageTemplate(id="body", frames=[body_frame], onPage=add_page_number)
+    cover_template = PageTemplate(id="cover", frames=[cover_frame],
+                                  onPage=make_cover(subtitle))
+    body_template = PageTemplate(id="body", frames=[body_frame],
+                                 onPage=make_page_footer(subtitle))
     doc.addPageTemplates([cover_template, body_template])
 
     # Use the cover template for page 1, then switch to the body
     # template for every subsequent page.
     story = [NextPageTemplate("body"), PageBreak()] + flowables
     doc.build(story)
-    print(f"PDF written: {PDF_PATH}")
+    print(f"PDF written: {pdf_path}")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--md", default=str(DEFAULT_MD_PATH),
+                   help="markdown source to render")
+    p.add_argument("--out", default=None,
+                   help="output PDF path (default: same name as --md)")
+    p.add_argument("--subtitle", default="Project Documentation",
+                   help="cover subtitle and page-footer label")
+    args = p.parse_args()
+    build_pdf(Path(args.md), Path(args.out) if args.out else None, args.subtitle)
 
 
 if __name__ == "__main__":
-    build_pdf()
+    main()
