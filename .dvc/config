@@ -1,0 +1,4 @@
+[core]
+    remote = mlsd_local
+['remote "mlsd_local"']
+    url = E:/poridhi/DA-Lab-Project/.dvc_remote

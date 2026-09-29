@@ -194,11 +194,9 @@ def score_application(input: dict) -> dict:
     X = np.asarray([[input[c] for c in input_cols]], dtype=float)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        if hasattr(model, "predict_proba"):
-            proba = model.predict_proba(X)[:, 1]
-        else:
-            # MLPWrapper exposes predict_proba too; this branch is defensive.
-            proba = np.asarray(model.predict(X), dtype=float)
+        # Both Phase 4 artifacts (XGBClassifier and MLPWrapper) expose
+        # predict_proba; this is the only call path.
+        proba = model.predict_proba(X)[:, 1]
     p = float(proba[0])
     return {
         "probability_of_default": p,

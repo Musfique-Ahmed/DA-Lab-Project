@@ -1,0 +1,28 @@
+baseline:
+  C: 1.0
+  class_weight: balanced
+  max_iter: 200
+  random_state: 42
+  type: logistic_regression
+data:
+  random_state: 42
+  test_size: 0.15
+  train_size: 0.7
+  validation_size: 0.15
+evaluation:
+  primary_metric: roc_auc
+  random_state: 42
+  threshold: 0.5
+features:
+  top_n: 30
+model:
+  eval_metric: logloss
+  learning_rate: 0.05
+  max_depth: 4
+  n_estimators: 300
+  random_state: 42
+  tree_method: hist
+  type: xgboost
+preprocessing:
+  high_cardinality_threshold: 10
+  missing_threshold: 0.6

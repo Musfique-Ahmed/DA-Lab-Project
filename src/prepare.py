@@ -1,0 +1,238 @@
+"""Prepare stage — MLSD pipeline.
+
+Loads the DVC-tracked raw CSV, runs the cleaning + encoding + split
+pipeline, and writes the scaled cleaned parquet + split indices.
+
+This is the `prepare` stage of `dvc.yaml`. It is intentionally a thin
+wrapper around the well-tested `src.data.clean` module so:
+
+  - All transformations stay identical to the DA project's pipeline.
+  - The `test_scaler_fit_only_on_train` invariant still applies.
+  - The split indices (random_state=42, 70/15/15 stratified) are
+    byte-identical between runs.
+
+Usage
+-----
+    python src/prepare.py
+        [--params params.yaml]
+        [--raw data/raw/application_train.csv]
+        [--out-parquet data/processed/train_clean.parquet]
+        [--out-indices data/processed/split_indices.npz]
+        [--out-summary reports/cleaning_summary.md]
+
+Why the CLI wrapper?
+--------------------
+The DA project's cleaning pipeline is exposed as a Python function in
+`src.data.clean.clean(df)`. Wrapping it in a CLI script makes it
+addressable as a DVC stage (`python src/prepare.py`) without forcing
+the cleaning logic into a notebook. The notebook (`00_data_cleaning.ipynb`)
+still exists for the DA project.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import yaml
+
+# Repo root on sys.path so `src.data.clean` is importable regardless of CWD.
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from src.data.clean import (  # noqa: E402
+    DAYS_EMPLOYED_SENTINEL,
+    DROP_MISSING_THRESHOLD,
+    HIGH_CARDINALITY_THRESHOLD,
+    RANDOM_STATE,
+    TEST_FRAC,
+    TRAIN_FRAC,
+    VAL_FRAC,
+    clean,
+)
+from src.data.load import load_application_train  # noqa: E402
+
+
+def load_params(params_path: Path) -> dict:
+    """Load params.yaml and return the relevant sub-sections.
+
+    Falls back to documented defaults if a key is missing — the
+    pipeline must never crash because of a missing optional parameter.
+    """
+    if not params_path.exists():
+        raise FileNotFoundError(
+            f"params.yaml not found at {params_path}. "
+            "Run `dvc repro` from the repo root, or pass --params."
+        )
+    with open(params_path, "r", encoding="utf-8") as fh:
+        params = yaml.safe_load(fh) or {}
+    data = params.get("data", {})
+    prep = params.get("preprocessing", {})
+    return {
+        "random_state": int(data.get("random_state", RANDOM_STATE)),
+        "train_size": float(data.get("train_size", TRAIN_FRAC)),
+        "validation_size": float(data.get("validation_size", VAL_FRAC)),
+        "test_size": float(data.get("test_size", TEST_FRAC)),
+        "missing_threshold": float(prep.get("missing_threshold", DROP_MISSING_THRESHOLD)),
+        "high_cardinality_threshold": int(
+            prep.get("high_cardinality_threshold", HIGH_CARDINALITY_THRESHOLD)
+        ),
+    }
+
+
+def run(
+    *,
+    raw_path: Path,
+    out_parquet: Path,
+    out_indices: Path,
+    out_summary: Path,
+    params: dict,
+) -> dict:
+    """Run the full prepare stage. Returns a small info dict for logging."""
+    print(f"[prepare] Loading raw CSV from {raw_path} ...")
+    df = load_application_train(raw_path)
+    print(f"[prepare] Raw shape: {df.shape}")
+
+    cleaned, info = clean(
+        df,
+        drop_threshold=params["missing_threshold"],
+        high_card_threshold=params["high_cardinality_threshold"],
+        random_state=params["random_state"],
+    )
+    print(
+        f"[prepare] Cleaned shape: {cleaned.shape}; "
+        f"sentinel fixed: {info['sentinel_replaced']:,}; "
+        f"dropped cols: {len(info['dropped_columns'])}; "
+        f"split: {info['split_sizes']}"
+    )
+
+    out_parquet.parent.mkdir(parents=True, exist_ok=True)
+    cleaned.to_parquet(out_parquet, index=False)
+    print(f"[prepare] Wrote cleaned parquet -> {out_parquet}")
+
+    # Persist split indices as boolean masks (matches src.data.clean convention).
+    split_col = cleaned["SPLIT"].values
+    target = cleaned["TARGET"].values.astype(int)
+    np.savez(
+        out_indices,
+        train_mask=(split_col == "train"),
+        val_mask=(split_col == "val"),
+        test_mask=(split_col == "test"),
+        target=target,
+    )
+    print(f"[prepare] Wrote split indices -> {out_indices}")
+
+    # Human-readable summary.
+    out_summary.parent.mkdir(parents=True, exist_ok=True)
+    out_summary.write_text(_render_summary(info, params), encoding="utf-8")
+    print(f"[prepare] Wrote cleaning summary -> {out_summary}")
+
+    info["random_state"] = params["random_state"]
+    info["params_used"] = params
+    return info
+
+
+def _render_summary(info: dict, params: dict) -> str:
+    """Render a markdown summary mirroring the DA project's cleaning_summary.md."""
+    lines: list[str] = []
+    lines.append("# Cleaning Summary — MLSD `prepare` stage")
+    lines.append("")
+    lines.append("Generated by `src.prepare.run()`.")
+    lines.append("")
+    lines.append("## Configuration")
+    lines.append("")
+    lines.append("```yaml")
+    for k, v in params.items():
+        lines.append(f"{k}: {v}")
+    lines.append("```")
+    lines.append("")
+    lines.append("## Shape")
+    lines.append("")
+    lines.append(f"- Rows in: **{info['n_rows_in']:,}**, columns in: **{info['n_cols_in']}**")
+    lines.append(f"- Rows out: **{info['n_rows_out']:,}**, columns out: **{info['n_cols_out']}**")
+    lines.append(f"- Numeric feature columns (post-encoding): **{info.get('feature_count', 0)}**")
+    lines.append("")
+    lines.append("## DAYS_EMPLOYED sentinel replaced")
+    lines.append("")
+    lines.append(
+        f"- Rows where `DAYS_EMPLOYED == {DAYS_EMPLOYED_SENTINEL}` were set to NaN: "
+        f"**{info['sentinel_replaced']:,}**"
+    )
+    lines.append("")
+    lines.append(f"## Columns dropped (> {params['missing_threshold']:.0%} missing)")
+    lines.append("")
+    if info["dropped_columns"]:
+        lines.append(f"**{len(info['dropped_columns'])} column(s) dropped:**")
+        lines.append("")
+        lines.append("| Column | Missing % |")
+        lines.append("|---|---|")
+        for entry in info["dropped_columns"]:
+            lines.append(f"| `{entry['column']}` | {entry['missing_pct']:.2%} |")
+    else:
+        lines.append("_None._")
+    lines.append("")
+    lines.append("## Encoding")
+    lines.append("")
+    lines.append(
+        f"- One-hot encoded ({len(info['one_hot_columns'])} columns): "
+        + ", ".join(f"`{c}`" for c in info["one_hot_columns"])
+    )
+    lines.append(
+        f"- Frequency encoded ({len(info['frequency_encoded_columns'])} columns): "
+        + ", ".join(f"`{c}`" for c in info["frequency_encoded_columns"])
+    )
+    lines.append("")
+    lines.append("## Stratified split")
+    lines.append("")
+    lines.append(f"- Train: **{info['split_sizes'].get('train', 0):,}**")
+    lines.append(f"- Val:   **{info['split_sizes'].get('val', 0):,}**")
+    lines.append(f"- Test:  **{info['split_sizes'].get('test', 0):,}**")
+    lines.append("")
+    lines.append("## Imputation")
+    lines.append("")
+    lines.append(f"- Columns with NaNs filled: **{len(info['fill_counts'])}**")
+    lines.append("- Numeric: column median. Categorical: literal `'MISSING'`.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--params", type=Path, default=REPO_ROOT / "params.yaml")
+    parser.add_argument(
+        "--raw",
+        type=Path,
+        default=REPO_ROOT / "data" / "raw" / "application_train.csv",
+    )
+    parser.add_argument(
+        "--out-parquet",
+        type=Path,
+        default=REPO_ROOT / "data" / "processed" / "train_clean.parquet",
+    )
+    parser.add_argument(
+        "--out-indices",
+        type=Path,
+        default=REPO_ROOT / "data" / "processed" / "split_indices.npz",
+    )
+    parser.add_argument(
+        "--out-summary",
+        type=Path,
+        default=REPO_ROOT / "reports" / "cleaning_summary.md",
+    )
+    args = parser.parse_args()
+
+    params = load_params(args.params)
+    run(
+        raw_path=args.raw,
+        out_parquet=args.out_parquet,
+        out_indices=args.out_indices,
+        out_summary=args.out_summary,
+        params=params,
+    )
+
+
+if __name__ == "__main__":
+    main()

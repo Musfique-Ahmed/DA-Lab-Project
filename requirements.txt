@@ -30,6 +30,13 @@ torch>=2.11,<3
 # Tested working version: 1.49.1 (Tornado-WSGI).
 streamlit>=1.38,<1.50
 
+# --- Pipeline orchestration (MLSD) ---
+dvc>=3.0,<4            # data + pipeline version control
+pyyaml>=6.0,<7         # params.yaml loader
+
+# --- Model registry / experiment tracking (MLSD Phase 5) ---
+mlflow>=2.10,<4        # model registry + experiment tracking
+
 # --- Testing ---
 pytest>=8.3,<9
 

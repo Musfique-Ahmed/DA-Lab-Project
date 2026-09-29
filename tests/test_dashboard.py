@@ -78,6 +78,61 @@ def test_segments_income_band_returns_categorical() -> None:
     assert list(out.cat.categories) == INCOME_BAND_LABELS
 
 
+def test_load_clean_overview_is_slim() -> None:
+    """Overview-tab loader must return <= 3 cols and <= 50 MiB.
+
+    Regression guard for ``numpy._core._exceptions._ArrayMemoryError``:
+    loading the full 144-column parquet and deep-copying the TRAIN split
+    cost ~232 MiB on the Overview tab. The slim loader should only pull
+    TARGET + SPLIT (plus possibly index). Skip cleanly if the parquet
+    is absent (CI environments don't have data/).
+    """
+    from dashboard._loaders import load_clean_overview
+
+    if not (REPO_ROOT / "data" / "processed" / "train_clean.parquet").exists():
+        pytest.skip("train_clean.parquet not present (data not pulled)")
+
+    df = load_clean_overview.__wrapped__() if hasattr(load_clean_overview, "__wrapped__") else load_clean_overview()
+
+    # Column budget: at most the slim subset, NOT the full 144.
+    assert df.shape[1] <= 3, f"load_clean_overview returned {df.shape[1]} cols; expected <= 3"
+    # Memory budget: < 50 MiB (the full frame was ~232 MiB after filtering).
+    bytes_used = df.memory_usage(deep=True).sum()
+    assert bytes_used < 50 * 1024 * 1024, (
+        f"load_clean_overview used {bytes_used / 1024 / 1024:.1f} MiB; "
+        "expected < 50 MiB"
+    )
+    # Required columns must be present.
+    assert "TARGET" in df.columns
+    assert "SPLIT" in df.columns
+    # Pre-filter: SPLIT must contain a "train" value we can filter on.
+    assert (df["SPLIT"] == "train").any()
+
+
+def test_overview_filtered_allocates_under_budget() -> None:
+    """Filtering + .copy() on the slim loader must stay under 10 MiB.
+
+    Guards the same regression: line 125 in app.py does
+    ``df[df["SPLIT"] == "train"].copy()``. With the slim loader this
+    should be ~3 MiB, not the 232 MiB it used to be.
+    """
+    from dashboard._loaders import load_clean_overview
+
+    if not (REPO_ROOT / "data" / "processed" / "train_clean.parquet").exists():
+        pytest.skip("train_clean.parquet not present (data not pulled)")
+
+    df = load_clean_overview.__wrapped__() if hasattr(load_clean_overview, "__wrapped__") else load_clean_overview()
+    train = df[df["SPLIT"] == "train"].copy()
+    bytes_used = train.memory_usage(deep=True).sum()
+    assert bytes_used < 10 * 1024 * 1024, (
+        f"Filtered train slice used {bytes_used / 1024 / 1024:.1f} MiB; "
+        "expected < 10 MiB"
+    )
+    # KPI sanity: TARGET exists and default rate is in [0, 1].
+    rate = float(train["TARGET"].mean())
+    assert 0.0 <= rate <= 1.0
+
+
 def test_score_application_three_buckets() -> None:
     """Form-driven applicants: Approve is reachable; mid-defaults are mid-risk.
 

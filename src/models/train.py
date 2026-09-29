@@ -13,14 +13,19 @@ Imbalance strategies (per Phase 4 plan):
 
 Each function also reports the `pos_count` / `neg_count` / `scale_pos_weight`
 it used so the notebook can show the exact numbers in the imbalance table.
+
+Lazy imports
+------------
+imblearn (SMOTE) and torch (MLP) are imported lazily inside the train_*
+functions that need them. This lets the rest of the codebase (and the
+MLSD pipeline scripts) import `src.models.train` without these optional
+dependencies installed.
 """
 from __future__ import annotations
 
 from typing import Any
 
 import numpy as np
-from imblearn.over_sampling import SMOTE
-from imblearn.pipeline import Pipeline as ImbPipeline
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
@@ -28,18 +33,24 @@ from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
 from src.models.evaluate import compute_metrics, pick_threshold
-from src.models.mlp import DEFAULT_RANDOM_STATE, MLPWrapper
 
-# Default seed for all sklearn/xgb estimators (MLPWrapper has its own).
-DEFAULT_SEED: int = DEFAULT_RANDOM_STATE
+# Default seed; DEFAULT_RANDOM_STATE from mlp.py is fetched lazily inside
+# train_mlp() so this module doesn't pull in torch at import time.
+DEFAULT_SEED: int = 42
 
 
 # ---------------------------------------------------------------------------
 # Helper: wrap an estimator in a Pipeline([SMOTE, estimator]) for the
 # `imbalance='smote'` case. We never call SMOTE outside a pipeline.
 # ---------------------------------------------------------------------------
-def _smote_pipeline(estimator, *, random_state: int = DEFAULT_SEED) -> ImbPipeline:
-    """Return an imblearn Pipeline: SMOTE(k=5) -> estimator."""
+def _smote_pipeline(estimator, *, random_state: int = DEFAULT_SEED):
+    """Return an imblearn Pipeline: SMOTE(k=5) -> estimator.
+
+    Lazy-imports imblearn so callers that don't use SMOTE don't pay
+    the import cost.
+    """
+    from imblearn.over_sampling import SMOTE
+    from imblearn.pipeline import Pipeline as ImbPipeline
     return ImbPipeline([
         ("smote", SMOTE(k_neighbors=5, random_state=random_state)),
         ("est", estimator),
@@ -99,8 +110,9 @@ def train_logreg(
     elif imbalance == "smote":
         est = base
         # SMOTE cannot synthesize NaN rows, so impute first.
-        pipe = _smote_pipeline(est)
-        # Prepend an impute step by replacing the standard pipeline.
+        # Lazy-import imblearn inside the branch.
+        from imblearn.over_sampling import SMOTE
+        from imblearn.pipeline import Pipeline as ImbPipeline
         pipe = ImbPipeline([
             ("imputer", SimpleImputer(strategy="median")),
             ("smote", SMOTE(k_neighbors=5, random_state=random_state)),
@@ -181,6 +193,8 @@ def train_xgboost(
     spw = _compute_scale_pos_weight(y_tr) if imbalance == "balanced" else 1.0
     if imbalance == "smote":
         from sklearn.impute import SimpleImputer
+        from imblearn.over_sampling import SMOTE
+        from imblearn.pipeline import Pipeline as ImbPipeline
         est = XGBClassifier(
             n_estimators=n_estimators, max_depth=max_depth,
             learning_rate=learning_rate,
@@ -232,12 +246,16 @@ def train_mlp(
     patience: int = 3,
     threshold: float = 0.5,
     random_state: int = DEFAULT_SEED,
-) -> tuple[MLPWrapper, dict[str, Any]]:
+) -> tuple[Any, dict[str, Any]]:
     """Fit an MLPWrapper.
 
     For "pos_weight" we pass `pos_weight = neg/pos` to BCEWithLogitsLoss.
     For "none" we use unweighted loss.
     """
+    # Lazy-import torch / MLPWrapper so callers that don't train an MLP
+    # don't pay the import cost (and don't fail if torch isn't installed).
+    from src.models.mlp import MLPWrapper, DEFAULT_RANDOM_STATE  # noqa: F401
+
     pos_w: float | None
     if imbalance == "pos_weight":
         pos_w = _compute_scale_pos_weight(y_tr)

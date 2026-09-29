@@ -199,11 +199,11 @@ All 148 features ranked by mean of XGB rank, RF rank, and SHAP rank.
 
 - Features in top-10 of all three rankings: 1.
 
-- Top-10 by XGB only: 8 -- `DEF_60_CNT_SOCIAL_CIRCLE`, `CODE_GENDER_M`, `FLAG_DOCUMENT_7`, `FLAG_DOCUMENT_3`, `NAME_EDUCATION_TYPE_Secondary / secondary special`, `FLAG_OWN_CAR_Y`, `NAME_EDUCATION_TYPE_Higher education`, `NAME_CONTRACT_TYPE_Revolving loans`.
+- Top-10 by XGB only: 8 -- `FLAG_DOCUMENT_7`, `NAME_CONTRACT_TYPE_Revolving loans`, `DEF_60_CNT_SOCIAL_CIRCLE`, `NAME_EDUCATION_TYPE_Secondary / secondary special`, `FLAG_DOCUMENT_3`, `FLAG_OWN_CAR_Y`, `CODE_GENDER_M`, `NAME_EDUCATION_TYPE_Higher education`.
 
-- Top-10 by RF only: 4 -- `DAYS_EMPLOYED`, `DAYS_LAST_PHONE_CHANGE`, `AGE_YEARS`, `AMT_GOODS_PRICE`.
+- Top-10 by RF only: 4 -- `AMT_GOODS_PRICE`, `DAYS_EMPLOYED`, `AGE_YEARS`, `DAYS_LAST_PHONE_CHANGE`.
 
-- Top-10 by SHAP only: 5 -- `REGION_POPULATION_RELATIVE`, `AMT_CREDIT`, `DAYS_REGISTRATION`, `AMT_ANNUITY`, `DAYS_ID_PUBLISH`.
+- Top-10 by SHAP only: 5 -- `REGION_POPULATION_RELATIVE`, `DAYS_ID_PUBLISH`, `DAYS_REGISTRATION`, `AMT_ANNUITY`, `AMT_CREDIT`.
 
 # Phase 3 Recommendation
 

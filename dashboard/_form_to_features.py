@@ -9,7 +9,10 @@ checkboxes, region population slider). It then needs to:
   1. Compute the 7 engineered features (AGE_YEARS, EMPLOYED_YEARS,
      CREDIT_INCOME_RATIO, ANNUITY_INCOME_RATIO, CREDIT_GOODS_RATIO,
      INCOME_PER_FAM_MEMBER, EXT_SOURCE_MEAN).
-  2. Set the one-hot dummies from the radio/select widgets.
+  2. Set the one-hot dummies from the radio/select widgets. Every
+     one of the 5 NAME_EDUCATION_TYPE options the Scorer tab exposes
+     is mapped to one of the two training dummies so no signal is
+     silently lost (see ``EDUCATION_TO_DUMMY``).
   3. Fill the 9 "background" columns with median values from the
      Phase 3 top-30 training set so the user doesn't have to enter
      every raw feature by hand.
@@ -33,6 +36,8 @@ Public API
 - ``_scaler_state()`` returns ``(mean, std)`` arrays fit on the train slice.
 - ``DEFAULT_FORM`` documents the 14 widget keys + their defaults so
   Streamlit widgets can initialize against a single source of truth.
+- ``EDUCATION_TO_DUMMY`` maps each education option the Scorer tab
+  exposes to the two top-30 training one-hots (so no signal is lost).
 """
 from __future__ import annotations
 
@@ -71,11 +76,25 @@ DEFAULT_FORM: dict[str, Any] = {
     "REGION_POPULATION_RELATIVE": 0.018,
 }
 
-#: One-hot dummies that ``train_top30.parquet`` carries. We mirror the
-#: Phase 1 cleaning choices (see ``src/data/clean.py``).
-EDUCATION_DUMMIES: dict[str, str] = {
-    "Higher education":                  "NAME_EDUCATION_TYPE_Higher education",
-    "Secondary / secondary special":     "NAME_EDUCATION_TYPE_Secondary / secondary special",
+#: Map every NAME_EDUCATION_TYPE option the Scorer tab offers to one of
+#: the two dummies carried in the top-30 parquet. The model only knows
+#: two one-hot columns, so values not in the original training set
+#: ("Lower secondary", "Incomplete higher", "Academic degree") get
+#: routed to whichever existing dummy is closest:
+#:
+#:   * "Lower secondary" / "Incomplete higher" → secondary dummy
+#:     (these are partial-secondary tracks in real life too)
+#:   * "Academic degree"                       → higher-education dummy
+#:     (highest academic tier, sits above "Higher education")
+#:
+#: We do *not* retrain the model — we just make sure the Scorer tab
+#: never silently drops the education signal to (0, 0).
+EDUCATION_TO_DUMMY: dict[str, str] = {
+    "Higher education":              "NAME_EDUCATION_TYPE_Higher education",
+    "Secondary / secondary special": "NAME_EDUCATION_TYPE_Secondary / secondary special",
+    "Lower secondary":               "NAME_EDUCATION_TYPE_Secondary / secondary special",
+    "Incomplete higher":             "NAME_EDUCATION_TYPE_Secondary / secondary special",
+    "Academic degree":               "NAME_EDUCATION_TYPE_Higher education",
 }
 
 
@@ -159,13 +178,15 @@ def form_to_features(form: dict[str, Any]) -> dict[str, float]:
     std_by_col = dict(zip(feature_cols, std))
 
     # --- Engineered features (mirror src/features/engineer.py) ------
-    # NOTE: DAYS_BIRTH / DAYS_EMPLOYED are *scaled* values in the
-    # training parquet. We have to convert the user's years back to
-    # days, *then* apply the same (mean, std) the scaler used on the
-    # raw days. This is an approximation because we don't have the
-    # raw-days scaler params, but the per-feature mean of the scaled
-    # DAYS_BIRTH ≈ 0 and std ≈ 1 (Phase 1 fit StandardScaler normally),
-    # so this is close.
+    # NOTE: DAYS_BIRTH / DAYS_EMPLOYED are stored as negative integers
+    # in the raw application_train.csv (e.g. -13000 = ~36 years old),
+    # and Phase 1's StandardScaler was fit on those raw negative values
+    # directly — *not* on absolute ages. So the conversion is exact:
+    # we take the user's years, flip the sign to match the parquet's
+    # convention, then the (mean, std) the scaler was trained on does
+    # the rest. The "AGE_YEARS" / "EMPLOYED_YEARS" derived columns in
+    # the top-30 parquet share those same negative-day conventions and
+    # are scaled independently.
     days_birth_raw = -int(round(form["AGE_YEARS"] * 365.25))
     days_employed_raw = -int(round(form["EMPLOYED_YEARS"] * 365.25))
 
@@ -193,8 +214,13 @@ def form_to_features(form: dict[str, Any]) -> dict[str, float]:
 
     # --- One-hot dummies from categorical widgets --------------------
     code_gender_m = 1.0 if form["CODE_GENDER"] == "M" else 0.0
-    edu_higher = 1.0 if form["NAME_EDUCATION_TYPE"] == "Higher education" else 0.0
-    edu_secondary = 1.0 if form["NAME_EDUCATION_TYPE"] == "Secondary / secondary special" else 0.0
+    # Route whichever option the user picked to the right dummy column
+    # via EDUCATION_TO_DUMMY. Everything else (Lower secondary,
+    # Incomplete higher, Academic degree) still produces a 1.0 signal
+    # rather than getting silently dropped.
+    edu_dummy_col = EDUCATION_TO_DUMMY[form["NAME_EDUCATION_TYPE"]]
+    edu_higher = 1.0 if edu_dummy_col == "NAME_EDUCATION_TYPE_Higher education" else 0.0
+    edu_secondary = 1.0 if edu_dummy_col == "NAME_EDUCATION_TYPE_Secondary / secondary special" else 0.0
     contract_revolving = 1.0 if form["NAME_CONTRACT_TYPE"] == "Revolving loans" else 0.0
     flag_own_car_y = 1.0 if form["FLAG_OWN_CAR"] else 0.0
     flag_document_3 = 1.0 if form["FLAG_DOCUMENT_3"] else 0.0
@@ -247,4 +273,4 @@ def form_to_features(form: dict[str, Any]) -> dict[str, float]:
     return {c: float(scaled_features[c]) for c in DEFAULT_INPUT_COLUMNS}
 
 
-__all__ = ["DEFAULT_FORM", "EDUCATION_DUMMIES", "form_to_features"]
+__all__ = ["DEFAULT_FORM", "EDUCATION_TO_DUMMY", "form_to_features"]

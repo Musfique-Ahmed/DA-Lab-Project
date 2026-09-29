@@ -27,7 +27,11 @@ import streamlit as st
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CLEAN_PARQUET = REPO_ROOT / "data" / "processed" / "train_clean.parquet"
 TOP30_PARQUET = REPO_ROOT / "data" / "processed" / "train_top30.parquet"
-RAW_CSV = REPO_ROOT / ".home-credit-default-risk" / "application_train.csv"
+# Raw CSV path: prefer the MLSD location (data/raw/) and fall back to
+# the legacy DA-project location (.home-credit-default-risk/).
+_RAW_CSV_PRIMARY = REPO_ROOT / "data" / "raw" / "application_train.csv"
+_RAW_CSV_LEGACY = REPO_ROOT / ".home-credit-default-risk" / "application_train.csv"
+RAW_CSV = _RAW_CSV_PRIMARY if _RAW_CSV_PRIMARY.exists() else _RAW_CSV_LEGACY
 IMPORTANCE_MD = REPO_ROOT / "reports" / "feature_importance.md"
 PHASE4_MD = REPO_ROOT / "reports" / "phase4_model_comparison.md"
 
@@ -41,23 +45,59 @@ def load_clean() -> pd.DataFrame:
     """
     if not CLEAN_PARQUET.exists():
         raise FileNotFoundError(
-            f"{CLEAN_PARQUET} not found. Run Phase 1 notebook to regenerate."
+            f"{CLEAN_PARQUET} not found. Run Phase 1 notebook "
+            "or `dvc repro` to regenerate."
         )
     return pd.read_parquet(CLEAN_PARQUET)
 
 
+# Columns required by the Portfolio Overview tab. Loading only these
+# avoids a ~232 MiB deep-copy allocation of the full 144-column DataFrame
+# that previously crashed with ``numpy._core._exceptions._ArrayMemoryError``
+# on memory-constrained machines (the filtered TRAIN split alone was
+# 141 cols x 215,257 rows x 8 bytes = 232 MiB).
+_OVERVIEW_COLUMNS = ["TARGET", "SPLIT"]
+
+
+@st.cache_data(show_spinner="Loading portfolio data…")
+def load_clean_overview() -> pd.DataFrame:
+    """Load only the columns the Overview tab needs (TARGET + SPLIT).
+
+    The Overview tab only computes default rate / class balance from
+    ``TARGET``, so loading the full 144-column parquet and then copying
+    the filtered frame is wasteful and blows the memory budget. This
+    loader reads just the two columns up front, keeping memory at
+    ~13 MiB instead of ~232 MiB.
+    """
+    if not CLEAN_PARQUET.exists():
+        raise FileNotFoundError(
+            f"{CLEAN_PARQUET} not found. Run Phase 1 notebook "
+            "or `dvc repro` to regenerate."
+        )
+    return pd.read_parquet(CLEAN_PARQUET, columns=_OVERVIEW_COLUMNS)
+
+
 @st.cache_data(show_spinner="Loading top-30 features…")
 def load_top30() -> pd.DataFrame:
-    """Load the Phase 3 top-30 parquet (raw scale, no scaling applied).
+    """Load the top-30-feature background table.
 
     Used by ``_form_to_features.py`` to fill in median values for the
     "background" columns the user doesn't enter explicitly.
+
+    Prefers the DA project's ``train_top30.parquet`` if present (it has
+    unscaled values, which is what the form needs). Falls back to the
+    MLSD pipeline's ``train_engineered.parquet`` (which is scaled but
+    otherwise equivalent for median-fill purposes).
     """
-    if not TOP30_PARQUET.exists():
-        raise FileNotFoundError(
-            f"{TOP30_PARQUET} not found. Run Phase 3 notebook to regenerate."
-        )
-    return pd.read_parquet(TOP30_PARQUET)
+    if TOP30_PARQUET.exists():
+        return pd.read_parquet(TOP30_PARQUET)
+    engineered = REPO_ROOT / "data" / "processed" / "train_engineered.parquet"
+    if engineered.exists():
+        return pd.read_parquet(engineered)
+    raise FileNotFoundError(
+        f"{TOP30_PARQUET} not found. Run Phase 3 notebook or "
+        f"`dvc repro` to regenerate."
+    )
 
 
 @st.cache_data(show_spinner="Loading application_train.csv…")
@@ -69,7 +109,8 @@ def load_raw() -> pd.DataFrame:
     """
     if not RAW_CSV.exists():
         raise FileNotFoundError(
-            f"{RAW_CSV} not found. Re-extract the dataset or pass path=..."
+            f"application_train.csv not found at either {_RAW_CSV_PRIMARY} "
+            f"or {_RAW_CSV_LEGACY}. Run `dvc pull` or place the dataset manually."
         )
     return pd.read_csv(RAW_CSV)
 
@@ -136,6 +177,7 @@ def load_phase4_summary() -> str:
 
 __all__ = [
     "load_clean",
+    "load_clean_overview",
     "load_top30",
     "load_raw",
     "load_importance_table",

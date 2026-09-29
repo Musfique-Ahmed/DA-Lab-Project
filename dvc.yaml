@@ -1,0 +1,156 @@
+# DVC pipeline definition for the MLSD Credit Risk Intelligence project.
+#
+# The pipeline has four stages. Each stage has explicit `deps` (files the
+# stage reads), `params` (values from params.yaml the stage reads), and
+# `outs` (files the stage produces). The `evaluate` stage also declares
+# `metrics` so `dvc metrics show` works.
+#
+# Run any of:
+#   dvc repro          — execute only stages that are out of date
+#   dvc dag            — print the dependency graph
+#   dvc status         — show which stages are dirty
+#   dvc metrics show   — display the tracked metrics
+#   dvc params diff    — show parameter changes since the last run
+
+stages:
+  # ---------------------------------------------------------------------------
+  # 1. prepare — clean raw CSV, encode categoricals, impute, split, scale
+  # ---------------------------------------------------------------------------
+  prepare:
+    desc: >-
+      Load the raw application_train.csv, drop high-missing columns,
+      impute, encode categoricals, do a stratified 70/15/15 split, and
+      StandardScaler-fit on the train slice only. Outputs the cleaned
+      parquet + split indices + cleaning summary.
+    cmd: python src/prepare.py
+    deps:
+      - src/prepare.py
+      - src/data/load.py
+      - src/data/clean.py
+      - data/raw/application_train.csv
+    params:
+      - data.random_state
+      - data.train_size
+      - data.validation_size
+      - data.test_size
+      - preprocessing.missing_threshold
+      - preprocessing.high_cardinality_threshold
+    outs:
+      - data/processed/train_clean.parquet
+      - data/processed/split_indices.npz
+      - reports/cleaning_summary.md
+
+  # ---------------------------------------------------------------------------
+  # 2. features — engineer 7 derived columns + top-N selection on train only
+  # ---------------------------------------------------------------------------
+  features:
+    desc: >-
+      Apply the 7 engineered features (AGE_YEARS, EMPLOYED_YEARS, three
+      ratios, INCOME_PER_FAM_MEMBER, EXT_SOURCE_MEAN). Then select the
+      top-N features using XGB + RF + SHAP importance ranks, fit on the
+      TRAIN slice only (no leakage from val/test).
+    cmd: python src/features.py
+    deps:
+      - src/features.py
+      - src/features/engineer.py
+      - src/features/select.py
+      - data/processed/train_clean.parquet
+      - data/processed/split_indices.npz
+    params:
+      - features.top_n
+      - data.random_state
+    outs:
+      - data/processed/train_engineered.parquet
+      - reports/selected_features.json
+
+  # ---------------------------------------------------------------------------
+  # 3. train — XGBoost (primary) + Logistic Regression (baseline)
+  # ---------------------------------------------------------------------------
+  train:
+    desc: >-
+      Train the primary model (XGBoost) and the baseline (Logistic
+      Regression) on the train slice using the selected features. Both
+      models are deterministic given the same data and seed. Model
+      artifacts are persisted as joblib pickles.
+    cmd: python src/train.py
+    deps:
+      - src/train.py
+      - data/processed/train_engineered.parquet
+      - reports/selected_features.json
+    params:
+      - model.type
+      - model.n_estimators
+      - model.max_depth
+      - model.learning_rate
+      - model.eval_metric
+      - model.tree_method
+      - model.random_state
+      - baseline.type
+      - baseline.C
+      - baseline.max_iter
+      - baseline.class_weight
+      - baseline.random_state
+      - data.random_state
+    outs:
+      - models/xgboost_model.pkl
+      - models/baseline_logistic_regression.pkl
+      - models/feature_columns.json
+
+  # ---------------------------------------------------------------------------
+  # 4. evaluate — metrics.json + ROC/PR/confusion plots (NEVER retrains)
+  # ---------------------------------------------------------------------------
+  evaluate:
+    desc: >-
+      Load the trained models, compute ROC-AUC + PR-AUC + precision +
+      recall + F1 + accuracy + confusion matrices on the validation AND
+      test slices, write reports/metrics.json (DVC-tracked metric) and
+      ROC/PR/confusion plots.
+    cmd: python src/evaluate.py
+    deps:
+      - src/evaluate.py
+      - models/xgboost_model.pkl
+      - models/baseline_logistic_regression.pkl
+      - models/feature_columns.json
+      - data/processed/train_engineered.parquet
+    params:
+      - evaluation.primary_metric
+      - evaluation.threshold
+      - data.random_state
+    metrics:
+      - reports/metrics.json:
+          cache: false
+    outs:
+      - reports/evaluation/roc_curves.png
+      - reports/evaluation/pr_curves.png
+      - reports/evaluation/confusion_matrices.png:
+          cache: false
+
+  # ---------------------------------------------------------------------------
+  # 5. drift — Population Stability Index on selected features (optional).
+  # ---------------------------------------------------------------------------
+  # NOT a core pipeline stage. This dataset has no per-row timestamp, so we
+  # cannot measure real temporal drift. Instead, we compare train vs val vs
+  # test slices of the same snapshot as a teaching artifact for the PSI
+  # formula and the conventional thresholds. See docs/DRIFT.md for the
+  # honest scope.
+  #
+  # Run individually with:   dvc repro drift
+  # Included in the default 'dvc repro' run because it has no heavy
+  # dependencies (just reads the engineered parquet). To skip, run the
+  # other four stages explicitly: dvc repro prepare features train evaluate.
+  # ---------------------------------------------------------------------------
+  drift:
+    desc: >-
+      Compute the Population Stability Index (PSI) between the train slice
+      and the val/test slices for every selected feature. Writes
+      reports/drift/{psi_table.csv, psi_top_features.png, drift_report.md}.
+    cmd: python src/drift.py
+    deps:
+      - src/drift.py
+      - data/processed/train_engineered.parquet
+      - reports/selected_features.json
+    outs:
+      - reports/drift/psi_table.csv
+      - reports/drift/psi_top_features.png
+      - reports/drift/drift_report.md
+      - reports/drift/summary.json

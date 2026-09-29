@@ -19,6 +19,7 @@ polished by ``/impecable`` (Phase 5 stop-point note).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from src.models.score import (  # noqa: E402
 from dashboard._form_to_features import DEFAULT_FORM, form_to_features  # noqa: E402
 from dashboard._loaders import (  # noqa: E402
     load_clean,
+    load_clean_overview,
     load_importance_table,
     load_phase4_summary,
     load_raw,
@@ -86,19 +88,53 @@ with st.sidebar:
     )
     st.markdown("---")
     st.markdown("#### Recommendation policy")
+    # Live threshold overrides — the user can slide these to demo the
+    # three PD bands with a single applicant without touching inputs.
+    # session_state ensures the values persist across reruns.
+    if "threshold_approve" not in st.session_state:
+        st.session_state["threshold_approve"] = float(THRESHOLD_APPROVE_MAX)
+    if "threshold_reject" not in st.session_state:
+        st.session_state["threshold_reject"] = float(THRESHOLD_REJECT_MIN)
+    # Clamp approve_max <= reject_min so the slider never crosses over.
+    _max_approve = float(min(st.session_state["threshold_reject"] - 0.01, 0.50))
+    st.session_state["threshold_approve"] = st.slider(
+        "Approve below",
+        min_value=0.05,
+        max_value=_max_approve,
+        value=float(st.session_state["threshold_approve"]),
+        step=0.01,
+        key="_threshold_approve_slider",
+        help="PD strictly less than this → Approve.",
+    )
+    _min_reject = float(max(st.session_state["threshold_approve"] + 0.01, 0.30))
+    st.session_state["threshold_reject"] = st.slider(
+        "Reject at/above",
+        min_value=_min_reject,
+        max_value=0.95,
+        value=float(st.session_state["threshold_reject"]),
+        step=0.01,
+        key="_threshold_reject_slider",
+        help="PD at or above this → Reject.",
+    )
+    _live_approve = st.session_state["threshold_approve"]
+    _live_reject = st.session_state["threshold_reject"]
     st.markdown(
-        f"<span style='color:#00D9B5'>●</span> Approve if p < {THRESHOLD_APPROVE_MAX}",
+        f"<span style='color:#00D9B5'>●</span> Approve if p &lt; {_live_approve:.2f}",
         unsafe_allow_html=True,
     )
     st.markdown(
         f"<span style='color:#3B82F6'>●</span> Manual Review if "
-        f"{THRESHOLD_APPROVE_MAX} ≤ p < {THRESHOLD_REJECT_MIN}",
+        f"{_live_approve:.2f} ≤ p &lt; {_live_reject:.2f}",
         unsafe_allow_html=True,
     )
     st.markdown(
-        f"<span style='color:#F87171'>●</span> Reject if p ≥ {THRESHOLD_REJECT_MIN}",
+        f"<span style='color:#F87171'>●</span> Reject if p ≥ {_live_reject:.2f}",
         unsafe_allow_html=True,
     )
+    if st.button("Reset thresholds to defaults", use_container_width=True):
+        st.session_state["threshold_approve"] = float(THRESHOLD_APPROVE_MAX)
+        st.session_state["threshold_reject"] = float(THRESHOLD_REJECT_MIN)
+        st.rerun()
     st.markdown("---")
     st.caption("Data: Home Credit Default Risk (307,511 loans).")
 
@@ -121,19 +157,18 @@ with tab_overview:
         "Filters apply only to the chart panels."
     )
 
-    df_clean = load_clean()
+    df_clean = load_clean_overview()
     df_clean = df_clean[df_clean["SPLIT"] == "train"].copy()
 
     # --- KPI cards ---
     total_apps = len(df_clean)
     default_rate = df_clean["TARGET"].mean()
     n_default = int(df_clean["TARGET"].sum())
-    # Approval rate: at Phase 4 thresholds, what share of the portfolio
-    # would be auto-approved (p < 0.20). We can't compute this without
-    # re-scoring every applicant, so we use a *proxy* derived from the
-    # actual base rate: apps with TARGET==0 are not necessarily "approved"
-    # but the proxy is sane for a KPI card.
-    approval_rate_proxy = 1.0 - default_rate
+    # "Repaid share" — i.e. the empirical fraction of loans that DIDN'T
+    # default. We use the raw share rather than the model's predicted
+    # approval rate because we don't want to re-score 215k applicants
+    # just to fill a KPI card. The label is honest about what it shows.
+    repaid_share = 1.0 - default_rate
     avg_pd = float(default_rate)  # The model is roughly calibrated so the
     # average PD in the training portfolio ≈ empirical default rate.
 
@@ -145,7 +180,7 @@ with tab_overview:
     with col3:
         st.metric("Avg probability of default", f"{avg_pd:.2%}")
     with col4:
-        st.metric("Default loans (count)", f"{n_default:,}")
+        st.metric("Repaid share (proxy)", f"{repaid_share:.2%}")
 
     st.markdown("---")
 
@@ -210,7 +245,7 @@ with tab_overview:
             xaxis=dict(gridcolor=PALETTE["panel_alt"]),
             margin=dict(l=10, r=10, t=20, b=10),
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width="stretch")
 
     st.markdown("---")
     st.markdown("### Recommendation policy")
@@ -257,84 +292,97 @@ with tab_scorer:
     col_form, col_result = st.columns([1, 1])
 
     with col_form:
-        with st.form("applicant_form"):
-            st.markdown("### Applicant details")
-            c1, c2 = st.columns(2)
-            with c1:
-                income = st.number_input(
-                    "Total annual income",
-                    min_value=10_000,
-                    max_value=10_000_000,
-                    value=int(DEFAULT_FORM["AMT_INCOME_TOTAL"]),
-                    step=5_000,
-                )
-                credit = st.number_input(
-                    "Credit amount",
-                    min_value=10_000,
-                    max_value=4_000_000,
-                    value=int(DEFAULT_FORM["AMT_CREDIT"]),
-                    step=5_000,
-                )
-                annuity = st.number_input(
-                    "Annuity (yearly)",
-                    min_value=1_000,
-                    max_value=500_000,
-                    value=int(DEFAULT_FORM["AMT_ANNUITY"]),
-                    step=1_000,
-                )
-                goods_price = st.number_input(
-                    "Goods price (for consumer loans)",
-                    min_value=10_000,
-                    max_value=4_000_000,
-                    value=int(DEFAULT_FORM["AMT_GOODS_PRICE"]),
-                    step=5_000,
-                )
-            with c2:
-                age = st.slider("Age (years)", 18, 80, int(DEFAULT_FORM["AGE_YEARS"]))
-                employed = st.slider("Employment length (years)", 0, 50,
-                                     int(DEFAULT_FORM["EMPLOYED_YEARS"]))
-                region_pop = st.slider(
-                    "Region population relative",
-                    min_value=0.0,
-                    max_value=0.10,
-                    value=float(DEFAULT_FORM["REGION_POPULATION_RELATIVE"]),
-                    step=0.001,
-                    format="%.3f",
-                )
+        st.markdown("### Applicant details")
+        c1, c2 = st.columns(2)
+        with c1:
+            income = st.number_input(
+                "Total annual income",
+                min_value=10_000,
+                max_value=10_000_000,
+                value=int(DEFAULT_FORM["AMT_INCOME_TOTAL"]),
+                step=5_000,
+            )
+            credit = st.number_input(
+                "Credit amount",
+                min_value=10_000,
+                max_value=4_000_000,
+                value=int(DEFAULT_FORM["AMT_CREDIT"]),
+                step=5_000,
+            )
+            annuity = st.number_input(
+                "Annuity (yearly)",
+                min_value=1_000,
+                max_value=500_000,
+                value=int(DEFAULT_FORM["AMT_ANNUITY"]),
+                step=1_000,
+            )
+            goods_price = st.number_input(
+                "Goods price (for consumer loans)",
+                min_value=10_000,
+                max_value=4_000_000,
+                value=int(DEFAULT_FORM["AMT_GOODS_PRICE"]),
+                step=5_000,
+            )
+        with c2:
+            age = st.slider("Age (years)", 18, 80, int(DEFAULT_FORM["AGE_YEARS"]))
+            employed = st.slider("Employment length (years)", 0, 50,
+                                 int(DEFAULT_FORM["EMPLOYED_YEARS"]))
+            region_pop = st.slider(
+                "Region population relative",
+                min_value=0.0,
+                max_value=0.10,
+                value=float(DEFAULT_FORM["REGION_POPULATION_RELATIVE"]),
+                step=0.001,
+                format="%.3f",
+            )
 
-            st.markdown("### External risk scores")
-            e1, e2, e3 = st.columns(3)
-            with e1:
-                ext1 = st.slider("EXT_SOURCE_1", 0.0, 1.0,
-                                 float(DEFAULT_FORM["EXT_SOURCE_1"]), 0.01)
-            with e2:
-                ext2 = st.slider("EXT_SOURCE_2", 0.0, 1.0,
-                                 float(DEFAULT_FORM["EXT_SOURCE_2"]), 0.01)
-            with e3:
-                ext3 = st.slider("EXT_SOURCE_3", 0.0, 1.0,
-                                 float(DEFAULT_FORM["EXT_SOURCE_3"]), 0.01)
+        st.markdown("### External risk scores")
+        st.caption(
+            "In the real Home Credit data these scores are always ≥ 0. "
+            "The negative end of the slider is a stress-test of the "
+            "model's upper-bound response — it lets you demonstrate the "
+            "**Reject** zone (PD ≥ 0.50)."
+        )
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            ext1 = st.slider("EXT_SOURCE_1", -1.0, 1.0,
+                             float(DEFAULT_FORM["EXT_SOURCE_1"]), 0.01)
+        with e2:
+            ext2 = st.slider("EXT_SOURCE_2", -1.0, 1.0,
+                             float(DEFAULT_FORM["EXT_SOURCE_2"]), 0.01)
+        with e3:
+            ext3 = st.slider("EXT_SOURCE_3", -1.0, 1.0,
+                             float(DEFAULT_FORM["EXT_SOURCE_3"]), 0.01)
 
-            st.markdown("### Categorical")
-            d1, d2 = st.columns(2)
-            with d1:
-                gender = st.radio("Gender", ["F", "M"],
-                                  index=0 if DEFAULT_FORM["CODE_GENDER"] == "F" else 1,
-                                  horizontal=True)
-                education = st.selectbox(
-                    "Education",
-                    ["Higher education", "Secondary / secondary special",
-                     "Lower secondary", "Incomplete higher", "Academic degree"],
-                    index=1,
-                )
-                contract = st.radio("Contract type", ["Cash loans", "Revolving loans"],
-                                    index=0 if DEFAULT_FORM["NAME_CONTRACT_TYPE"] == "Cash loans" else 1,
-                                    horizontal=True)
-            with d2:
-                own_car = st.checkbox("Owns a car", value=DEFAULT_FORM["FLAG_OWN_CAR"])
-                flag_doc_3 = st.checkbox("Submitted FLAG_DOCUMENT_3",
-                                          value=DEFAULT_FORM["FLAG_DOCUMENT_3"])
+        st.markdown("### Categorical")
+        d1, d2 = st.columns(2)
+        with d1:
+            gender = st.radio("Gender", ["F", "M"],
+                              index=0 if DEFAULT_FORM["CODE_GENDER"] == "F" else 1,
+                              horizontal=True)
+            education = st.selectbox(
+                "Education",
+                ["Higher education", "Secondary / secondary special",
+                 "Lower secondary", "Incomplete higher", "Academic degree"],
+                index=1,
+            )
+            contract = st.radio("Contract type", ["Cash loans", "Revolving loans"],
+                                index=0 if DEFAULT_FORM["NAME_CONTRACT_TYPE"] == "Cash loans" else 1,
+                                horizontal=True)
+        with d2:
+            own_car = st.checkbox("Owns a car", value=DEFAULT_FORM["FLAG_OWN_CAR"])
+            flag_doc_3 = st.checkbox("Submitted FLAG_DOCUMENT_3",
+                                      value=DEFAULT_FORM["FLAG_DOCUMENT_3"])
 
-            submitted = st.form_submit_button("Score applicant")
+        # Explicit prediction trigger: score renders live above, but the
+        # button commits the *current* applicant to session state so it
+        # can be highlighted, exported, or compared in the rest of the tab.
+        predict_clicked = st.button(
+            "Score applicant",
+            type="primary",
+            use_container_width=True,
+            help="Lock in the current inputs and save this applicant.",
+        )
 
     # --- Build the form dict (always, so we can show the sensitivity panel) ---
     form = {
@@ -357,15 +405,62 @@ with tab_scorer:
 
     with col_result:
         st.markdown("### Live score")
-        if not submitted:
-            st.info("👈 Fill in the form and press **Score applicant** to see the result.")
-        else:
+        st.caption(
+            "Updates automatically as you adjust the inputs on the left. "
+            "Press **Score applicant** on the left to lock in this applicant."
+        )
+
+        # Run the pipeline under a guard so a model-side failure never
+        # leaves session_state half-written. If anything blows up we
+        # surface the error in the live-score panel and skip the locked-
+        # in card entirely.
+        features: dict[str, float] | None = None
+        p: float | None = None
+        rec: str | None = None
+        result: dict | None = None
+        score_error: str | None = None
+        try:
             features = form_to_features(form)
             result = score_application(features)
             p = result["probability_of_default"]
             rec = result["recommendation"]
+        except Exception as exc:  # pragma: no cover - defensive
+            score_error = f"{type(exc).__name__}: {exc}"
+            # Clear any stale lock-in to avoid showing a mismatched PD.
+            st.session_state["last_scored_form"] = None
+            st.session_state["last_scored_p"] = None
 
-            # Recommendation card — hero, not a generic card.
+        # If the user clicked "Score applicant" this rerun, persist the
+        # *successful* score to session state so the locked-in card
+        # below and downstream widgets can reference it.
+        if predict_clicked and score_error is None:
+            st.session_state["last_scored_form"] = dict(form)
+            st.session_state["last_scored_at"] = _dt.datetime.now().strftime("%H:%M:%S")
+            st.session_state["last_scored_p"] = p
+
+        # On a model failure, render the error and stop here — the rest
+        # of the panel assumes a successful score.
+        if score_error is not None:
+            st.error(
+                "Scoring failed. The model probably couldn't handle one "
+                "of the inputs as supplied. The full pipeline is shown "
+                "below; please adjust the inputs and try again.  \n\n"
+                f"```\n{score_error}\n```"
+            )
+
+        # Recommendation card — hero, not a generic card.
+        if rec is not None:
+            # Override the model's recommendation with one derived from the
+            # live (sidebar) thresholds, so dragging those sliders actually
+            # changes the card.
+            live_approve = st.session_state["threshold_approve"]
+            live_reject = st.session_state["threshold_reject"]
+            if p < live_approve:
+                rec = "Approve"
+            elif p >= live_reject:
+                rec = "Reject"
+            else:
+                rec = "Manual Review"
             risk_class = {
                 "Approve":       "risk-approve",
                 "Manual Review": "risk-manual",
@@ -381,7 +476,7 @@ with tab_scorer:
                 <div class="cri-card {risk_class}">
                     <div class="kicker">{kicker}</div>
                     <div class="rec">{rec}</div>
-                    <div class="big">{p:.1%}</div>
+                    <div class="big">{p:.2%}</div>
                     <div class="muted">probability of default</div>
                 </div>
                 """,
@@ -389,13 +484,15 @@ with tab_scorer:
             )
 
             # Gauge: horizontal segmented bar.
-            # Positions: 0 (Approve) -> THRESHOLD_APPROVE_MAX -> THRESHOLD_REJECT_MIN -> 1
+            # Positions: 0 (Approve) -> live approve threshold -> live reject threshold -> 1
             # We highlight where p falls.
+            live_approve = st.session_state["threshold_approve"]
+            live_reject = st.session_state["threshold_reject"]
             gauge = go.Figure()
 
             # Three segments.
             gauge.add_trace(go.Bar(
-                x=[THRESHOLD_APPROVE_MAX],
+                x=[live_approve],
                 y=["PD"],
                 orientation="h",
                 marker=dict(color=PALETTE["mint"]),
@@ -403,7 +500,7 @@ with tab_scorer:
                 hovertemplate="Approve zone: 0 → %{x}<extra></extra>",
             ))
             gauge.add_trace(go.Bar(
-                x=[THRESHOLD_REJECT_MIN - THRESHOLD_APPROVE_MAX],
+                x=[live_reject - live_approve],
                 y=["PD"],
                 orientation="h",
                 marker=dict(color=PALETTE["blue"]),
@@ -411,7 +508,7 @@ with tab_scorer:
                 hovertemplate="Manual zone: %{x}<extra></extra>",
             ))
             gauge.add_trace(go.Bar(
-                x=[1.0 - THRESHOLD_REJECT_MIN],
+                x=[1.0 - live_reject],
                 y=["PD"],
                 orientation="h",
                 marker=dict(color=PALETTE["red"]),
@@ -438,34 +535,118 @@ with tab_scorer:
                 xaxis=dict(range=[0, 1], gridcolor=PALETTE["panel_alt"]),
                 yaxis=dict(showticklabels=False),
             )
-            st.plotly_chart(gauge, width='stretch')
+            st.plotly_chart(gauge, width="stretch")
+        # end if rec is not None
 
-            # Sensitivity panel: bump each numeric input ±10% and show the new PD.
-            with st.expander("Sensitivity: would ±10% change the recommendation?"):
-                st.caption(
-                    "Each row nudges one input by ±10% (numeric ones) and "
-                    "re-scores. Useful for understanding which inputs the "
-                    "model is most sensitive to."
+        # Locked-in confirmation card (only after the Score button has
+        # been pressed at least once). Gives the button a real purpose
+        # beyond the live rerender. Guarded separately so a model failure
+        # can't leave a stale lock-in visible.
+        last_form = st.session_state.get("last_scored_form")
+        last_at = st.session_state.get("last_scored_at")
+        last_p = st.session_state.get("last_scored_p")
+        if last_form is not None and last_p is not None:
+            with st.container():
+                st.success(
+                    f"Locked in at **{last_at}** — applicant PD **{last_p:.2%}** "
+                    f"(income={last_form['AMT_INCOME_TOTAL']:,.0f}, "
+                    f"EXT_SOURCE_MEAN="
+                    f"{(last_form['EXT_SOURCE_1']+last_form['EXT_SOURCE_2']+last_form['EXT_SOURCE_3'])/3:.2f})."
                 )
+
+        # Debug trace: show the raw form dict and scaled features so the
+        # user can verify their inputs actually reach the model. Closes
+        # the "is anything changing?" gap. Skipped on model failure since
+        # `features` wouldn't have been produced.
+        with st.expander("Debug: inputs → scaled features (live)"):
+            st.caption(
+                "Inputs on the left become these standardized features. "
+                "If a value doesn't move when you change a widget, the bug "
+                "is in widget→form binding; if it moves but PD doesn't, the "
+                "model just isn't sensitive to that feature for this applicant."
+            )
+            df_in = pd.DataFrame([
+                {"input": k, "value": form[k]} for k in sorted(form.keys())
+            ])
+            st.dataframe(df_in, hide_index=True, width="stretch")
+            if features is not None:
+                df_feat = pd.DataFrame([
+                    {"feature": k, "scaled": features[k]} for k in sorted(features.keys())
+                ])
+                st.dataframe(df_feat, hide_index=True, width="stretch")
+            else:
+                st.caption("_Scaled features unavailable (model scoring failed)._")
+
+        # Sensitivity panel: nudge each numeric input additively and show
+        # the resulting PD. Additive (not multiplicative) so a slider
+        # sitting at 0 still produces a meaningful delta. Integer-typed
+        # inputs are rounded so re-entering them via the widget doesn't
+        # reject the value.
+        with st.expander("Sensitivity: would ±10% change the recommendation?"):
+            st.caption(
+                "Each row nudges one input by ±10% (additive, so a value "
+                "already at 0 still produces a meaningful delta) and "
+                "re-scores. Integer inputs (age, employment) are "
+                "rounded. Rows where the input is exactly 0 are skipped."
+            )
+
+            integer_keys = {"AGE_YEARS", "EMPLOYED_YEARS"}
+
+            @st.cache_data(show_spinner=False)
+            def _sensitivity_rows(_form_tuple):
+                """Compute the 16 (input × sign) sensitivity rows.
+
+                Keyed on the full form tuple so the cache only recomputes
+                when any input changes (kept tiny — one applicant at a
+                time is scored).
+                """
                 numeric_keys = [
                     "AMT_INCOME_TOTAL", "AMT_CREDIT", "AMT_ANNUITY",
                     "AGE_YEARS", "EMPLOYED_YEARS",
                     "EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3",
                 ]
                 rows = []
+                base = dict(_form_tuple)
                 for key in numeric_keys:
-                    for sign, label in [(+1.10, "+10%"), (0.90, "−10%")]:
-                        perturbed = dict(form)
-                        perturbed[key] = float(form[key]) * sign
-                        out = score_application(form_to_features(perturbed))
-                        rows.append({
-                            "Input": key,
-                            "Δ": label,
-                            "New PD": f"{out['probability_of_default']:.3f}",
-                            "New recommendation": out["recommendation"],
-                        })
-                sens_df = pd.DataFrame(rows)
-                st.dataframe(sens_df, width='stretch', hide_index=True)
+                    base_val = float(base[key])
+                    # Add 1e-9 to break the "0 * 1.1 = 0" trap.
+                    for sign, label in [(+1, "+10%"), (-1, "−10%")]:
+                        if abs(base_val) < 1e-6:
+                            rows.append({
+                                "Input": key,
+                                "Δ": label,
+                                "New PD": "—",
+                                "New recommendation": "(input is 0)",
+                            })
+                            continue
+                        delta = max(0.1, 0.10 * abs(base_val))
+                        new_val = base_val + sign * delta
+                        if key in integer_keys:
+                            new_val = int(round(new_val))
+                        perturbed = dict(base)
+                        perturbed[key] = float(new_val)
+                        try:
+                            out = score_application(form_to_features(perturbed))
+                            rows.append({
+                                "Input": key,
+                                "Δ": label,
+                                "New PD": f"{out['probability_of_default']:.3f}",
+                                "New recommendation": out["recommendation"],
+                            })
+                        except Exception as exc:  # pragma: no cover - defensive
+                            rows.append({
+                                "Input": key,
+                                "Δ": label,
+                                "New PD": "—",
+                                "New recommendation": f"error: {exc}"[:60],
+                            })
+                return rows
+
+            # Hashable cache key: sorted tuple of (k, v).
+            form_key = tuple(sorted(form.items()))
+            rows = _sensitivity_rows(form_key)
+            sens_df = pd.DataFrame(rows)
+            st.dataframe(sens_df, width="stretch", hide_index=True)
 
 
 # ---------------------------------------------------------------------------
@@ -526,12 +707,12 @@ with tab_importance:
         margin=dict(l=10, r=10, t=20, b=10),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    st.plotly_chart(fig, width='stretch')
+    st.plotly_chart(fig, width="stretch")
 
     with st.expander("Underlying table"):
         st.dataframe(
             importance[["rank", "feature", "category", "mean_rank", "combined_score"]],
-            width='stretch',
+            width="stretch",
             hide_index=True,
         )
 
@@ -611,7 +792,7 @@ with tab_segments:
             xaxis=dict(title="", gridcolor=PALETTE["panel_alt"]),
             margin=dict(l=10, r=10, t=20, b=10),
         )
-        st.plotly_chart(fig, width='stretch')
+        st.plotly_chart(fig, width="stretch")
 
         with st.expander("Underlying table"):
             show_df = seg_df.rename(columns={
@@ -619,7 +800,7 @@ with tab_segments:
                 "ci_lo": "ci_95_lo",
                 "ci_hi": "ci_95_hi",
             })
-            st.dataframe(show_df, width='stretch', hide_index=True)
+            st.dataframe(show_df, width="stretch", hide_index=True)
 
             # Downloadable CSV.
             csv = show_df.to_csv(index=False).encode("utf-8")
