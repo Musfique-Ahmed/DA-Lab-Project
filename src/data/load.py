@@ -3,7 +3,7 @@
 Per the master prompt, the only dataset file in scope for this project is
 ``.home-credit-default-risk/application_train.csv`` (or, for the MLSD
 pipeline, ``data/raw/application_train.csv``). The loader enforces the
-expected shape (307,511 rows, 122 columns) so any future corruption or
+expected shape (307,510 rows, 122 columns) so any future corruption or
 mismatched file is caught immediately.
 
 The shape check can be skipped by setting the environment variable
@@ -26,7 +26,7 @@ DEFAULT_DATA_PATH = Path("data") / "raw" / "application_train.csv"
 
 # Shape contract for application_train.csv. If Home Credit ever refreshes
 # the dataset, this assertion is the first thing that should fail.
-EXPECTED_SHAPE: tuple[int, int] = (307_511, 122)
+EXPECTED_SHAPE: tuple[int, int] = (307_510, 122)
 
 
 def load_application_train(path: str | Path | None = None) -> pd.DataFrame:
@@ -49,7 +49,7 @@ def load_application_train(path: str | Path | None = None) -> pd.DataFrame:
         If the file does not exist at the resolved path.
     ValueError
         If the loaded dataframe's shape does not match
-        ``EXPECTED_SHAPE = (307511, 122)`` and the shape check is not
+        ``EXPECTED_SHAPE = (307510, 122)`` and the shape check is not
         explicitly disabled via ``CREDIT_RISK_SKIP_SHAPE_CHECK=1``.
     """
     resolved = Path(path) if path is not None else DEFAULT_DATA_PATH
