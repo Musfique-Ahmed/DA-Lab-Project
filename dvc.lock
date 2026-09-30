@@ -5,15 +5,15 @@ stages:
     deps:
     - path: data/raw/application_train.csv
       hash: md5
-      md5: 793a017f41fbac1dc28176b26dbab30e
-      size: 166133370
+      md5: 66f17781415d099dfb9ab65e218cee44
+      size: 166132757
     - path: src/data/clean.py
       hash: md5
       md5: 3c337866b238b2dbd25a69f040c7eb99
       size: 13851
     - path: src/data/load.py
       hash: md5
-      md5: b0a4c62ad9d2da32e7c9470683275e17
+      md5: 10e00e033c5ea7c855759064fffd48fb
       size: 3032
     - path: src/prepare.py
       hash: md5
@@ -30,27 +30,27 @@ stages:
     outs:
     - path: data/processed/split_indices.npz
       hash: md5
-      md5: a6b5005492057eda7c07ae291abe271b
-      size: 3383637
+      md5: f34d7a3f7c914107ec1bc48d0303a5c4
+      size: 3383626
     - path: data/processed/train_clean.parquet
       hash: md5
-      md5: 288c3b1467811a3523c4183b6bbff8d5
-      size: 23094973
+      md5: 1f1859b4a7ad2db29683e701df219e4f
+      size: 23094920
     - path: reports/cleaning_summary.md
       hash: md5
-      md5: c5a04ac3fbf2ffc041f298bcd83e958f
+      md5: 458ade4dacd68d5f7707d7f184424f55
       size: 1799
   features:
     cmd: python src/features.py
     deps:
     - path: data/processed/split_indices.npz
       hash: md5
-      md5: a6b5005492057eda7c07ae291abe271b
-      size: 3383637
+      md5: f34d7a3f7c914107ec1bc48d0303a5c4
+      size: 3383626
     - path: data/processed/train_clean.parquet
       hash: md5
-      md5: 288c3b1467811a3523c4183b6bbff8d5
-      size: 23094973
+      md5: 1f1859b4a7ad2db29683e701df219e4f
+      size: 23094920
     - path: src/features.py
       hash: md5
       md5: faddb8f10e00b23d2436630b82ab7df8
@@ -70,23 +70,23 @@ stages:
     outs:
     - path: data/processed/train_engineered.parquet
       hash: md5
-      md5: ca42c7a7f04851ddb5443d40abe28392
-      size: 28804419
+      md5: 0fc757f6d64488e3a06a47ef1d7d6ffb
+      size: 28804357
     - path: reports/selected_features.json
       hash: md5
-      md5: 1486991f54884382a043c502a4a2d497
-      size: 7528
+      md5: 133abba8d21069624bf314006cae1953
+      size: 7442
   train:
     cmd: python src/train.py
     deps:
     - path: data/processed/train_engineered.parquet
       hash: md5
-      md5: ca42c7a7f04851ddb5443d40abe28392
-      size: 28804419
+      md5: 0fc757f6d64488e3a06a47ef1d7d6ffb
+      size: 28804357
     - path: reports/selected_features.json
       hash: md5
-      md5: 1486991f54884382a043c502a4a2d497
-      size: 7528
+      md5: 133abba8d21069624bf314006cae1953
+      size: 7442
     - path: src/train.py
       hash: md5
       md5: 3ee67e8932512be9705388ebbf9cac7e
@@ -100,7 +100,7 @@ stages:
         baseline.type: logistic_regression
         data.random_state: 42
         model.eval_metric: logloss
-        model.learning_rate: 0.05
+        model.learning_rate: 0.1
         model.max_depth: 4
         model.n_estimators: 300
         model.random_state: 42
@@ -109,35 +109,35 @@ stages:
     outs:
     - path: models/baseline_logistic_regression.pkl
       hash: md5
-      md5: 81f9b89ba4b901c5d55af95b2b144850
+      md5: 7ae0c10a7586f7192dbb69ce99a4ae8d
       size: 2817
     - path: models/feature_columns.json
       hash: md5
-      md5: 32db7482a434d61e4b1ea5a4a8d70a0f
-      size: 967
+      md5: 5149e3e54d08f68cc431f111b54d10a9
+      size: 959
     - path: models/xgboost_model.pkl
       hash: md5
-      md5: 7f1373ce09ec3fd29cdab01c39a935de
-      size: 518915
+      md5: cf7f345d752aa4a0689db515fe47562b
+      size: 506506
   evaluate:
     cmd: python src/evaluate.py
     deps:
     - path: data/processed/train_engineered.parquet
       hash: md5
-      md5: ca42c7a7f04851ddb5443d40abe28392
-      size: 28804419
+      md5: 0fc757f6d64488e3a06a47ef1d7d6ffb
+      size: 28804357
     - path: models/baseline_logistic_regression.pkl
       hash: md5
-      md5: 81f9b89ba4b901c5d55af95b2b144850
+      md5: 7ae0c10a7586f7192dbb69ce99a4ae8d
       size: 2817
     - path: models/feature_columns.json
       hash: md5
-      md5: 32db7482a434d61e4b1ea5a4a8d70a0f
-      size: 967
+      md5: 5149e3e54d08f68cc431f111b54d10a9
+      size: 959
     - path: models/xgboost_model.pkl
       hash: md5
-      md5: 7f1373ce09ec3fd29cdab01c39a935de
-      size: 518915
+      md5: cf7f345d752aa4a0689db515fe47562b
+      size: 506506
     - path: src/evaluate.py
       hash: md5
       md5: 8fa1570a139ad592292093d8d0bf6510
@@ -150,31 +150,31 @@ stages:
     outs:
     - path: reports/evaluation/confusion_matrices.png
       hash: md5
-      md5: f19f8b82bc126c04bcf65901d129829d
-      size: 57904
+      md5: 15717b99ba8147e8db44d3e3a6fda8a4
+      size: 57135
     - path: reports/evaluation/pr_curves.png
       hash: md5
-      md5: c9a6188cde881a9c17531dca7eb7adb6
-      size: 84654
+      md5: fd16c2b19ddbcc76c601940fe2fd738a
+      size: 84969
     - path: reports/evaluation/roc_curves.png
       hash: md5
-      md5: 6b2aa82f24fc123df099cb339a70f091
-      size: 96926
+      md5: 78b5f65ee514a5984ad16594f59cdd39
+      size: 96365
     - path: reports/metrics.json
       hash: md5
-      md5: e5b370269e3fdbf2d4f15a8812a34715
-      size: 1865
+      md5: 20f154e4b57141d69042fb226df91098
+      size: 1867
   drift:
     cmd: python src/drift.py
     deps:
     - path: data/processed/train_engineered.parquet
       hash: md5
-      md5: ca42c7a7f04851ddb5443d40abe28392
-      size: 28804419
+      md5: 0fc757f6d64488e3a06a47ef1d7d6ffb
+      size: 28804357
     - path: reports/selected_features.json
       hash: md5
-      md5: 1486991f54884382a043c502a4a2d497
-      size: 7528
+      md5: 133abba8d21069624bf314006cae1953
+      size: 7442
     - path: src/drift.py
       hash: md5
       md5: 4f187ba3382ae25bba459dff2dc221cd
@@ -182,17 +182,17 @@ stages:
     outs:
     - path: reports/drift/drift_report.md
       hash: md5
-      md5: 17a05eead7d00bf944263995887ff923
-      size: 3906
+      md5: febdca2007223cb31beb0800b6e1034b
+      size: 3898
     - path: reports/drift/psi_table.csv
       hash: md5
-      md5: 73aa718250c6853e7b95a2a9612bbc1f
-      size: 2626
+      md5: 3a5f9d71d00bb1fedb131d72cccfe61b
+      size: 2664
     - path: reports/drift/psi_top_features.png
       hash: md5
-      md5: 35ecfcbcaa81ccef13e8f3b844c6ec92
-      size: 145155
+      md5: f5137e80dbce1691c4242c4f407a967f
+      size: 144395
     - path: reports/drift/summary.json
       hash: md5
-      md5: 8142d61932ce9e32fc1b14dffe28941b
-      size: 177
+      md5: 70b19cdfbc680fae972d641a1d73c423
+      size: 176
