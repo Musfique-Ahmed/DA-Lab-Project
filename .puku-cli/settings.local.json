@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"f:/Git Repo/DA Lab Project/.venv/Scripts/python.exe\" -c \"import sys, streamlit; print\\(sys.version.split\\(\\)[0], streamlit.__version__\\)\")"
+    ]
+  }
+}
